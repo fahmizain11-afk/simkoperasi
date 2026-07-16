@@ -1,0 +1,345 @@
+{
+  "entities": {
+    "Member": {
+      "title": "Member",
+      "description": "Information about a cooperative member.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "noAnggota": { "type": "string" },
+        "nama": { "type": "string" },
+        "alamat": { "type": "string" },
+        "noHp": { "type": "string" },
+        "tanggalBergabung": { "type": "string" },
+        "jenisKelamin": { "type": "string", "enum": ["Laki-laki", "Perempuan"] }
+      },
+      "required": ["id", "noAnggota", "nama", "tanggalBergabung"]
+    },
+    "KoperasiSetup": {
+      "title": "KoperasiSetup",
+      "description": "Setup/profile information of the cooperative.",
+      "type": "object",
+      "properties": {
+        "namaKoperasi": { "type": "string" },
+        "slogan": { "type": "string" },
+        "alamatKantor": { "type": "string" },
+        "noBadanHukum": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "jenisBungaPinjaman": { "type": "string", "enum": ["flat", "menurun"] },
+        "biayaProvisiPersen": { "type": "number" },
+        "jasaSimpananSukarelaPersen": { "type": "number" },
+        "kasAwal": { "type": "number" },
+        "piutangAwal": { "type": "number" },
+        "persediaanWarungAwal": { "type": "number" },
+        "inventarisAwal": { "type": "number" },
+        "simpananPokokAwal": { "type": "number" },
+        "simpananWajibAwal": { "type": "number" },
+        "simpananSukarelaAwal": { "type": "number" },
+        "modalAwal": { "type": "number" },
+        "danaCadanganAwal": { "type": "number" }
+      },
+      "required": ["namaKoperasi", "slogan", "alamatKantor", "jenisBungaPinjaman", "biayaProvisiPersen", "jasaSimpananSukarelaPersen"]
+    },
+    "Simpanan": {
+      "title": "Simpanan",
+      "description": "Savings transactions of members.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "jenis": { "type": "string", "enum": ["Pokok", "Wajib", "Sukarela"] },
+        "jumlah": { "type": "number" },
+        "keterangan": { "type": "string" },
+        "transaksiId": { "type": "string" }
+      },
+      "required": ["id", "anggotaId", "tanggal", "jenis", "jumlah"]
+    },
+    "Pinjaman": {
+      "title": "Pinjaman",
+      "description": "Loan application and state.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "nominalPinjaman": { "type": "number" },
+        "tenor": { "type": "number" },
+        "bungaFlatPersen": { "type": "number" },
+        "biayaProvisiPersen": { "type": "number" },
+        "provisiDipotong": { "type": "number" },
+        "jumlahDiterima": { "type": "number" },
+        "status": { "type": "string", "enum": ["Belum Lunas", "Lunas"] },
+        "angsuranPokokPerBulan": { "type": "number" },
+        "jasaPerBulan": { "type": "number" },
+        "totalAngsuranPerBulan": { "type": "number" },
+        "totalWajibBayar": { "type": "number" }
+      },
+      "required": ["id", "anggotaId", "tanggal", "nominalPinjaman", "tenor", "bungaFlatPersen", "status"]
+    },
+    "Angsuran": {
+      "title": "Angsuran",
+      "description": "Loan repayment install logs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "pinjamanId": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "jumlahBayar": { "type": "number" },
+        "bulanKe": { "type": "number" },
+        "keterangan": { "type": "string" }
+      },
+      "required": ["id", "pinjamanId", "anggotaId", "tanggal", "jumlahBayar", "bulanKe"]
+    },
+    "PendapatanLain": {
+      "title": "PendapatanLain",
+      "description": "Other income streams of the cooperative.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "sumber": { "type": "string", "enum": ["warung", "bunga_simpanan", "denda", "lain_lain"] },
+        "nominal": { "type": "number" },
+        "keterangan": { "type": "string" }
+      },
+      "required": ["id", "tanggal", "sumber", "nominal"]
+    },
+    "BebanKoperasi": {
+      "title": "BebanKoperasi",
+      "description": "Expenses incurred by the cooperative.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "kategori": { "type": "string", "enum": ["gaji_karyawan", "listrik", "gaji_pengurus", "gaji_pengawas", "operasional_kantor", "beban_rapat", "beban_lain"] },
+        "nominal": { "type": "number" },
+        "keterangan": { "type": "string" }
+      },
+      "required": ["id", "tanggal", "kategori", "nominal"]
+    },
+    "ManasukaBungaLog": {
+      "title": "ManasukaBungaLog",
+      "description": "Calculated interest dividend records.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "bulanTahun": { "type": "string" },
+        "totalSimpanan": { "type": "number" },
+        "bungaPersen": { "type": "number" },
+        "jumlahApresiasi": { "type": "number" },
+        "statusNotifikasi": { "type": "string", "enum": ["Belum Kirim", "Terkirim"] },
+        "tanggalKalkulasi": { "type": "string" }
+      },
+      "required": ["id", "anggotaId", "bulanTahun", "totalSimpanan", "bungaPersen", "jumlahApresiasi", "statusNotifikasi"]
+    },
+    "Pembelian": {
+      "title": "Pembelian",
+      "description": "Stock purchase log records.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "namaBarang": { "type": "string" },
+        "kategori": { "type": "string", "enum": ["persediaan_warung", "seragam", "persediaan_barang", "inventaris", "lain_lain"] },
+        "kuantitas": { "type": "number" },
+        "hargaSatuan": { "type": "number" },
+        "totalHarga": { "type": "number" },
+        "keterangan": { "type": "string" }
+      },
+      "required": ["id", "tanggal", "namaBarang", "kategori", "kuantitas", "hargaSatuan", "totalHarga"]
+    },
+    "PiutangWarung": {
+      "title": "PiutangWarung",
+      "description": "Warung cooperative accounts receivable/debts sync log.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "jenis": { "type": "string", "enum": ["hutang_baru", "pelunasan"] },
+        "nominal": { "type": "number" },
+        "keterangan": { "type": "string" }
+      },
+      "required": ["id", "anggotaId", "tanggal", "jenis", "nominal"]
+    },
+    "Pengumuman": {
+      "title": "Pengumuman",
+      "description": "Custom announcement created by administrator.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "judul": { "type": "string" },
+        "konten": { "type": "string" },
+        "isUrgent": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["Aktif", "Nonaktif"] }
+      },
+      "required": ["id", "tanggal", "judul", "konten", "isUrgent", "status"]
+    },
+    "PengajuanPinjaman": {
+      "title": "PengajuanPinjaman",
+      "description": "Loan proposal submitted by members.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "tanggalPengajuan": { "type": "string" },
+        "nominalPinjaman": { "type": "number" },
+        "tenor": { "type": "number" },
+        "bungaFlatPersen": { "type": "number" },
+        "biayaProvisiPersen": { "type": "number" },
+        "provisiDipotong": { "type": "number" },
+        "jumlahDiterima": { "type": "number" },
+        "status": { "type": "string", "enum": ["Pending", "Disetujui", "Ditolak"] },
+        "alasanPengajuan": { "type": "string" },
+        "catatanPengurus": { "type": "string" }
+      },
+      "required": ["id", "anggotaId", "tanggalPengajuan", "nominalPinjaman", "tenor", "bungaFlatPersen", "biayaProvisiPersen", "provisiDipotong", "jumlahDiterima", "status"]
+    },
+    "PembayaranPending": {
+      "title": "PembayaranPending",
+      "description": "Pending payment request submitted by members for mandatory savings or loan installments.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "namaAnggota": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "jenis": { "type": "string", "enum": ["Simpanan Wajib", "Angsuran"] },
+        "jumlah": { "type": "number" },
+        "pinjamanId": { "type": "string" },
+        "bulanKe": { "type": "number" },
+        "status": { "type": "string", "enum": ["Pending", "Disetujui", "Ditolak"] },
+        "buktiTransferUrl": { "type": "string" },
+        "catatanPengurus": { "type": "string" }
+      },
+      "required": ["id", "anggotaId", "namaAnggota", "tanggal", "jenis", "jumlah", "status"]
+    },
+    "WarungBarang": {
+      "title": "WarungBarang",
+      "description": "Information about merchandise items available in Warung Dana Segar.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "namaBarang": { "type": "string" },
+        "harga": { "type": "number" },
+        "deskripsi": { "type": "string" },
+        "fotoUrl": { "type": "string" },
+        "stok": { "type": "number" }
+      },
+      "required": ["id", "namaBarang", "harga", "deskripsi"]
+    },
+    "PengurusPengawas": {
+      "title": "PengurusPengawas",
+      "description": "Supervisors and Board Members of the cooperative.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nama": { "type": "string" },
+        "jabatan": { "type": "string", "enum": ["pengurus", "pengawas"] },
+        "fotoUrl": { "type": "string" },
+        "peranDetail": { "type": "string" }
+      },
+      "required": ["id", "nama", "jabatan"]
+    },
+    "GaleriKoperasi": {
+      "title": "GaleriKoperasi",
+      "description": "Slideshow activities displayed in dashboard.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tanggal": { "type": "string" },
+        "judul": { "type": "string" },
+        "deskripsi": { "type": "string" },
+        "fotoUrl": { "type": "string" }
+      },
+      "required": ["id", "tanggal", "judul", "fotoUrl"]
+    },
+    "RekeningNeraca": {
+      "title": "RekeningNeraca",
+      "description": "Custom account pos balance sheet entry for the cooperative.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "kode": { "type": "string" },
+        "nama": { "type": "string" },
+        "kategori": { "type": "string", "enum": ["Aktiva", "Pasiva"] },
+        "saldo": { "type": "number" },
+        "keterangan": { "type": "string" }
+      },
+      "required": ["id", "kode", "nama", "kategori", "saldo"]
+    }
+  },
+  "firestore": {
+    "setup": {
+      "schema": "KoperasiSetup",
+      "description": "Saves cooperative global settings profile doc."
+    },
+    "members": {
+      "schema": "Member",
+      "description": "Table for members."
+    },
+    "simpanan": {
+      "schema": "Simpanan",
+      "description": "Saving logs."
+    },
+    "pinjaman": {
+      "schema": "Pinjaman",
+      "description": "Pinjaman requests and details."
+    },
+    "angsuran": {
+      "schema": "Angsuran",
+      "description": "Repayment installations."
+    },
+    "income": {
+      "schema": "PendapatanLain",
+      "description": "Income logs."
+    },
+    "expenses": {
+      "schema": "BebanKoperasi",
+      "description": "Expense logs."
+    },
+    "manasukaLogs": {
+      "schema": "ManasukaBungaLog",
+      "description": "Interest calculations."
+    },
+    "pembelian": {
+      "schema": "Pembelian",
+      "description": "Inventory purchase ledger."
+    },
+    "piutang_warung": {
+      "schema": "PiutangWarung",
+      "description": "Warung/Kantin receivables."
+    },
+    "announcements": {
+      "schema": "Pengumuman",
+      "description": "Announcements displayed on home dashboard."
+    },
+    "pengajuan_pinjaman": {
+      "schema": "PengajuanPinjaman",
+      "description": "Submitted loan applications from members."
+    },
+    "pembayaran_pending": {
+      "schema": "PembayaranPending",
+      "description": "Pending payments submitted by members for verification."
+    },
+    "warung_barang": {
+      "schema": "WarungBarang",
+      "description": "Store items sold by Warung Dana Segar."
+    },
+    "pengurus_pengawas": {
+      "schema": "PengurusPengawas",
+      "description": "Board and supervisors of the cooperative."
+    },
+    "galeri_koperasi": {
+      "schema": "GaleriKoperasi",
+      "description": "Cooperative activity slideshow photos and info."
+    },
+    "rekening": {
+      "schema": "RekeningNeraca",
+      "description": "Additional custom asset/liability balance sheet accounts."
+    }
+  }
+}

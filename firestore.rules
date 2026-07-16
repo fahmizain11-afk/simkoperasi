@@ -1,0 +1,159 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Catch-all default block
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    // Setup Collection
+    match /setup/{setupId} {
+      allow read: if true;
+      allow write: if true; // Teller can update setup details
+    }
+
+    // Members Collection
+    match /members/{memberId} {
+      allow read: if true;
+      allow write: if isValidId(memberId);
+    }
+
+    // Simpanan Collection
+    match /simpanan/{simpananId} {
+      allow read: if true;
+      allow write: if isValidId(simpananId);
+    }
+
+    // Pinjaman Collection
+    match /pinjaman/{pinjamanId} {
+      allow read: if true;
+      allow write: if isValidId(pinjamanId);
+    }
+
+    // Angsuran Collection
+    match /angsuran/{angsuranId} {
+      allow read: if true;
+      allow write: if isValidId(angsuranId);
+    }
+
+    // Income Collection
+    match /income/{incomeId} {
+      allow read: if true;
+      allow write: if isValidId(incomeId);
+    }
+
+    // Expenses Collection
+    match /expenses/{expenseId} {
+      allow read: if true;
+      allow write: if isValidId(expenseId);
+    }
+
+    // ManasukaLogs Collection
+    match /manasukaLogs/{logId} {
+      allow read: if true;
+      allow write: if isValidId(logId);
+    }
+
+    // Pembelian Collection
+    match /pembelian/{pembelianId} {
+      allow read: if true;
+      allow write: if isValidId(pembelianId);
+    }
+
+    // Piutang Warung Collection
+    match /piutang_warung/{piutangWarungId} {
+      allow read: if true;
+      allow write: if isValidId(piutangWarungId);
+    }
+
+    // Announcements Collection
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow write: if isValidId(announcementId);
+    }
+
+    // Pengajuan Pinjaman Collection
+    match /pengajuan_pinjaman/{pengajuanId} {
+      allow read: if true;
+      allow write: if isValidId(pengajuanId);
+    }
+
+    // Pembayaran Pending Collection
+    match /pembayaran_pending/{pembayaranId} {
+      allow read: if true;
+      allow write: if isValidId(pembayaranId);
+    }
+
+    // Warung Barang Collection
+    match /warung_barang/{warungBarangId} {
+      allow read: if true;
+      allow write: if isValidId(warungBarangId);
+    }
+
+    // Pengurus Pengawas Collection
+    match /pengurus_pengawas/{pengurusPengawasId} {
+      allow read: if true;
+      allow write: if isValidId(pengurusPengawasId);
+    }
+
+    // Galeri Koperasi Collection
+    match /galeri_koperasi/{galeriId} {
+      allow read: if true;
+      allow write: if isValidId(galeriId);
+    }
+
+    // Rekening Collection
+    match /rekening/{rekeningId} {
+      allow read: if true;
+      allow write: if isValidId(rekeningId);
+    }
+
+    // Test Connections
+    match /test/{id} {
+      allow read, write: if true;
+    }
+    match /system_test/{id} {
+      allow read, write: if true;
+    }
+
+    // Backup / Dynamic Sync Collections
+    match /koperasi_setup/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_members/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_simpanan/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_pinjaman/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_angsuran/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_income/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_expenses/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_warung_barang/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_pengurus_pengawas/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_galeri_koperasi/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_rekening/{id} {
+      allow read, write: if true;
+    }
+  }
+}

@@ -1,7 +1,9 @@
 {
-  "name": "Remix: Koperasi Dana Segar",
+  "name": "Dana Segar V2",
   "description": "Simpan Pinjam, Pembayaran Angsuran, Manajemen Anggota, Laporan Laba Rugi dan Neraca Digital secara Real-time",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "camera"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

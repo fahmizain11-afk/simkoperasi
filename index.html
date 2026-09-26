@@ -1,13 +1,85 @@
 <!doctype html>
-<html lang="en">
+<html lang="id">
   <head>
+    <script>
+      // Suppress benign preview iframe private network access and dev-server notices
+      (function() {
+        function isBenign(arg) {
+          if (!arg) return false;
+          try {
+            var s = typeof arg === 'object' ? (arg.message || arg.stack || String(arg)) : String(arg);
+            return s.indexOf('[vite]') !== -1 || 
+                   s.indexOf('WebSocket') !== -1 || 
+                   s.indexOf('websocket') !== -1 ||
+                   s.indexOf('local network') !== -1 ||
+                   s.indexOf('Private Network Access') !== -1;
+          } catch(e) {
+            return false;
+          }
+        }
+        function hasBenign(args) {
+          for (var i = 0; i < args.length; i++) {
+            if (isBenign(args[i])) return true;
+          }
+          return false;
+        }
+        var origError = console.error;
+        console.error = function() {
+          if (hasBenign(arguments)) return;
+          return origError.apply(console, arguments);
+        };
+        var origWarn = console.warn;
+        console.warn = function() {
+          if (hasBenign(arguments)) return;
+          return origWarn.apply(console, arguments);
+        };
+        window.addEventListener('error', function(e) {
+          if (isBenign(e.message) || isBenign(e.error)) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          }
+        }, true);
+        window.addEventListener('unhandledrejection', function(e) {
+          if (isBenign(e.reason)) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          }
+        }, true);
+      })();
+    </script>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Koperasi Dana Segar - Sistem Simpan Pinjam & Akuntansi</title>
+    <meta name="description" content="Simpan Pinjam, Pembayaran Angsuran, Manajemen Anggota, Unit Usaha Warung & POS Kasir, Laporan Laba Rugi dan Neraca Digital" />
+    <meta property="og:title" content="Koperasi Dana Segar - Sistem Simpan Pinjam & Akuntansi" />
+    <meta property="og:description" content="Simpan Pinjam, Pembayaran Angsuran, Manajemen Anggota, Unit Usaha Warung & POS Kasir, Laporan Laba Rugi dan Neraca Digital" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="alternate icon" type="image/png" href="/pwa-192x192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    
+    <!-- PWA & Mobile Web App Meta -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Dana Segar" />
+    <meta name="application-name" content="Koperasi Dana Segar" />
+    <meta name="theme-color" content="#047857" />
+    <script>
+      (function() {
+        try {
+          if (localStorage.getItem('koperasi_dark_mode') === 'true') {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

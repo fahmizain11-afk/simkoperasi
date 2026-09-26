@@ -270,6 +270,90 @@
         "keterangan": { "type": "string" }
       },
       "required": ["id", "kode", "nama", "kategori", "saldo"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "User login accounts and access control credentials.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "member"] },
+        "nama": { "type": "string" },
+        "posisiJabatan": { "type": "string" },
+        "anggotaId": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "username", "password", "role", "nama", "isActive"]
+    },
+    "SecurityLog": {
+      "title": "SecurityLog",
+      "description": "Security audit logs and access trace events.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "username": { "type": "string" },
+        "action": { "type": "string" },
+        "status": { "type": "string", "enum": ["SUCCESS", "FAILED", "WARNING"] },
+        "ipAddress": { "type": "string" },
+        "details": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "username", "action", "status"]
+    },
+    "ItemAnggaranRAPBK": {
+      "title": "ItemAnggaranRAPBK",
+      "description": "RAPBK budget targets and realization item.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tahun": { "type": "number" },
+        "kategori": { "type": "string", "enum": ["PENDAPATAN", "BEBAN", "INVESTASI", "PERMODALAN"] },
+        "subKategori": { "type": "string" },
+        "kodeAkun": { "type": "string" },
+        "namaItem": { "type": "string" },
+        "targetNominal": { "type": "number" },
+        "targetVolume": { "type": "number" },
+        "satuan": { "type": "string" },
+        "catatan": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "tahun", "kategori", "namaItem", "targetNominal"]
+    },
+    "RAPBKSetting": {
+      "title": "RAPBKSetting",
+      "description": "Annual RAPBK configuration and approval notes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tahun": { "type": "number" },
+        "status": { "type": "string", "enum": ["DRAFT", "DISETUJUI_RAT", "REVISI", "DITUTUP"] },
+        "tanggalDisetujui": { "type": "string" },
+        "disetujuiOleh": { "type": "string" },
+        "catatanRAT": { "type": "string" },
+        "targetSHUKotor": { "type": "number" },
+        "targetSHUBersih": { "type": "number" }
+      },
+      "required": ["id", "tahun", "status"]
+    },
+    "WhatsAppLog": {
+      "title": "WhatsAppLog",
+      "description": "Log of messages dispatched via WhatsApp Gateway.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "recipientNama": { "type": "string" },
+        "recipientPhone": { "type": "string" },
+        "messageType": { "type": "string", "enum": ["SIMPANAN_WAJIB", "TAGIHAN_PINJAMAN", "PIUTANG_WARUNG", "AKUMULASI", "KUITANSI", "CUSTOM"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "status": { "type": "string", "enum": ["SENT", "PENDING", "FAILED"] },
+        "sender": { "type": "string" }
+      },
+      "required": ["id", "recipientNama", "recipientPhone", "messageType", "content", "timestamp", "status"]
     }
   },
   "firestore": {
@@ -340,6 +424,26 @@
     "rekening": {
       "schema": "RekeningNeraca",
       "description": "Additional custom asset/liability balance sheet accounts."
+    },
+    "user_accounts": {
+      "schema": "UserAccount",
+      "description": "System user login accounts and credentials."
+    },
+    "security_logs": {
+      "schema": "SecurityLog",
+      "description": "Audit and security login activity logs."
+    },
+    "anggaran_rapbk": {
+      "schema": "ItemAnggaranRAPBK",
+      "description": "Annual budget and planning line items for the cooperative."
+    },
+    "rapbk_settings": {
+      "schema": "RAPBKSetting",
+      "description": "Annual RAPBK status, RAT endorsement, and meta configurations."
+    },
+    "whatsapp_logs": {
+      "schema": "WhatsAppLog",
+      "description": "History of notifications and receipts sent through WhatsApp."
     }
   }
 }

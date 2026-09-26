@@ -8,13 +8,12 @@ service cloud.firestore {
 
     // Helper functions
     function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     // Setup Collection
-    match /setup/{setupId} {
-      allow read: if true;
-      allow write: if true; // Teller can update setup details
+    match /setup/{document=**} {
+      allow read, write: if true;
     }
 
     // Members Collection
@@ -113,6 +112,36 @@ service cloud.firestore {
       allow write: if isValidId(rekeningId);
     }
 
+    // User Accounts Collection
+    match /user_accounts/{accountId} {
+      allow read: if true;
+      allow write: if isValidId(accountId);
+    }
+
+    // Security Logs Collection
+    match /security_logs/{logId} {
+      allow read: if true;
+      allow write: if isValidId(logId);
+    }
+
+    // Anggaran RAPBK Collection
+    match /anggaran_rapbk/{itemId} {
+      allow read: if true;
+      allow write: if isValidId(itemId);
+    }
+
+    // RAPBK Settings Collection
+    match /rapbk_settings/{settingId} {
+      allow read: if true;
+      allow write: if isValidId(settingId);
+    }
+
+    // WhatsApp Logs Collection
+    match /whatsapp_logs/{logId} {
+      allow read: if true;
+      allow write: if isValidId(logId);
+    }
+
     // Test Connections
     match /test/{id} {
       allow read, write: if true;
@@ -153,6 +182,9 @@ service cloud.firestore {
       allow read, write: if true;
     }
     match /koperasi_rekening/{id} {
+      allow read, write: if true;
+    }
+    match /koperasi_user_accounts/{id} {
       allow read, write: if true;
     }
   }

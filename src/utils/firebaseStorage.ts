@@ -5,10 +5,10 @@ import {
   getDocs, 
   setDoc, 
   deleteDoc, 
-  writeBatch
+  writeBatch,
+  onSnapshot
 } from 'firebase/firestore';
 import { db, auth } from '../firebase';
-import { compressImage } from './imageCompressor';
 import { 
   Member, 
   Simpanan, 
@@ -46,6 +46,29 @@ export interface FirestoreErrorInfo {
   }
 }
 
+/**
+ * Recursively strips keys with undefined values from objects before writing to Firestore.
+ * Firestore throws a runtime exception if any field is undefined.
+ */
+export function sanitizeForFirestore<T>(data: T): any {
+  if (data === null || data === undefined) {
+    return null;
+  }
+  if (Array.isArray(data)) {
+    return data.map(item => sanitizeForFirestore(item));
+  }
+  if (typeof data === 'object' && !(data instanceof Date)) {
+    const cleaned: Record<string, any> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined) {
+        cleaned[key] = sanitizeForFirestore(value);
+      }
+    }
+    return cleaned;
+  }
+  return data;
+}
+
 function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
@@ -67,28 +90,6 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Deep sanitization helper to strip undefined properties recursively for Firestore compatibility
-function sanitizeForFirestore<T>(obj: T): any {
-  if (obj === undefined) return null;
-  if (obj === null) return null;
-  if (Array.isArray(obj)) {
-    return obj.map(item => sanitizeForFirestore(item));
-  }
-  if (typeof obj === 'object') {
-    const res: any = {};
-    for (const key in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        const val = obj[key];
-        if (val !== undefined) {
-          res[key] = sanitizeForFirestore(val);
-        }
-      }
-    }
-    return res;
-  }
-  return obj;
-}
-
 // 1. Setup operations
 export async function fetchKoperasiSetup(): Promise<KoperasiSetup | null> {
   const path = 'setup/info';
@@ -108,29 +109,7 @@ export async function saveKoperasiSetup(setup: KoperasiSetup): Promise<void> {
   const path = 'setup/info';
   try {
     const docRef = doc(db, 'setup', 'info');
-    
-    // Defensive check: if logo or kartuBgUrl are large base64 strings, compress them
-    let logoUrl = setup.logoUrl;
-    if (logoUrl && logoUrl.startsWith('data:image/') && logoUrl.length > 50000) {
-      try {
-        logoUrl = await compressImage(logoUrl, 400, 400, 0.8);
-      } catch (e) {
-        console.error("Defensive logo compression failed", e);
-      }
-    }
-    
-    let kartuBgUrl = setup.kartuBgUrl;
-    if (kartuBgUrl && kartuBgUrl.startsWith('data:image/') && kartuBgUrl.length > 100000) {
-      try {
-        kartuBgUrl = await compressImage(kartuBgUrl, 800, 800, 0.75);
-      } catch (e) {
-        console.error("Defensive background compression failed", e);
-      }
-    }
-
-    const updatedSetup = { ...setup, logoUrl, kartuBgUrl };
-    const sanitized = sanitizeForFirestore(updatedSetup);
-    await setDoc(docRef, sanitized);
+    await setDoc(docRef, setup);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -158,10 +137,42 @@ export async function saveCollectionItem<T extends { id: string }>(
   const path = `${collectionName}/${item.id}`;
   try {
     const docRef = doc(db, collectionName, item.id);
-    const sanitized = sanitizeForFirestore(item);
-    await setDoc(docRef, sanitized);
+    const cleanedItem = sanitizeForFirestore(item);
+    await setDoc(docRef, cleanedItem, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * Real-time listener for any Firestore collection using onSnapshot.
+ * Automatically synchronizes changes across all clients, tabs, and devices.
+ */
+export function subscribeCollection<T>(
+  collectionName: string,
+  onUpdate: (items: T[]) => void,
+  onError?: (error: any) => void
+): () => void {
+  try {
+    const colRef = collection(db, collectionName);
+    const unsubscribe = onSnapshot(
+      colRef,
+      (querySnapshot) => {
+        const items: T[] = [];
+        querySnapshot.forEach((docSnap) => {
+          items.push({ ...docSnap.data() } as T);
+        });
+        onUpdate(items);
+      },
+      (err) => {
+        console.warn(`[Firestore Realtime] Snapshot error for ${collectionName}:`, err);
+        if (onError) onError(err);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.warn(`[Firestore Realtime] Failed to subscribe to ${collectionName}:`, err);
+    return () => {};
   }
 }
 
@@ -198,8 +209,8 @@ export async function seedCollection<T extends { id: string }>(
     const batch = writeBatch(db);
     items.forEach((item) => {
       const docRef = doc(db, collectionName, item.id);
-      const sanitized = sanitizeForFirestore(item);
-      batch.set(docRef, sanitized);
+      const cleaned = sanitizeForFirestore(item);
+      batch.set(docRef, cleaned, { merge: true });
     });
     await batch.commit();
   } catch (error) {

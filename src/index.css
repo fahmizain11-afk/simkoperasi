@@ -1,6 +1,8 @@
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: "Poppins", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
@@ -20,8 +22,14 @@
 
 body {
   font-family: var(--font-sans);
-  background-color: var(--color-slate-50);
-  color: var(--color-slate-800);
+  background-color: #f8fafc;
+  color: #1e293b;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.dark body {
+  background-color: #0f172a;
+  color: #f1f5f9;
 }
 
 /* Custom scrollbar to keep layout immaculate */
@@ -39,4 +47,45 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(148, 163, 184, 0.5);
 }
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-slip, #printable-slip *,
+  #pos-receipt-print-area, #pos-receipt-print-area * {
+    visibility: visible;
+  }
+  #printable-slip {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100vw;
+    height: auto;
+    margin: 0;
+    padding: 24px;
+    background: white !important;
+    color: #0f172a !important;
+    z-index: 99999;
+  }
+  #pos-receipt-print-area {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    top: 0;
+    width: 80mm;
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 12px;
+    background: white !important;
+    color: #000 !important;
+    border: none !important;
+    box-shadow: none !important;
+    z-index: 99999;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
+
 

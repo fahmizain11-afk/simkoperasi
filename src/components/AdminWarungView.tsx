@@ -1,12 +1,17 @@
-import React, { useState } from 'react';
-import { WarungBarang, Member, PiutangWarung, Pembelian, PendapatanLain } from '../types';
-import { formatRupiah } from '../utils/finance';
+import React, { useState, useMemo } from 'react';
+import { WarungBarang, Member, PiutangWarung, Pembelian, PendapatanLain, KoperasiSetup, UserAccount, Simpanan, Pinjaman, Angsuran } from '../types';
+import { formatRupiah, sortMembersNaturally } from '../utils/finance';
 import { 
   Store, Plus, Trash2, Edit3, Save, X, Image as ImageIcon, Sparkles, Upload,
-  Users, Calendar, ArrowUpRight, ArrowDownLeft, Search, AlertCircle, ShoppingCart, Lock
+  Users, Calendar, ArrowUpRight, ArrowDownLeft, Search, AlertCircle, ShoppingCart, Barcode, Tag,
+  Coins, TrendingUp, DollarSign, Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { compressImage } from '../utils/imageCompressor';
+import { WarungPOSView } from './WarungPOSView';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
+import { CameraBarcodeScannerModal } from './CameraBarcodeScannerModal';
+import { CetakLabelRakModal, generateStoreEan13 } from './CetakLabelRakModal';
 
 interface AdminWarungViewProps {
   warungBarang: WarungBarang[];
@@ -19,12 +24,15 @@ interface AdminWarungViewProps {
   onDeletePiutang: (id: string) => Promise<void>;
   pembelian: Pembelian[];
   onAddPembelian: (item: Omit<Pembelian, 'id'>) => Promise<void>;
-  onUpdatePembelian?: (id: string, item: Omit<Pembelian, 'id'>) => Promise<void>;
   onDeletePembelian: (id: string) => Promise<void>;
   income: PendapatanLain[];
   onAddIncome: (item: Omit<PendapatanLain, 'id'>) => Promise<void>;
   onDeleteIncome: (id: string) => Promise<void>;
-  availableCash?: number;
+  setup?: KoperasiSetup;
+  currentUserAccount?: UserAccount | null;
+  simpanan?: Simpanan[];
+  pinjaman?: Pinjaman[];
+  angsuran?: Angsuran[];
 }
 
 export function AdminWarungView({
@@ -38,27 +46,73 @@ export function AdminWarungView({
   onDeletePiutang,
   pembelian,
   onAddPembelian,
-  onUpdatePembelian,
   onDeletePembelian,
   income,
   onAddIncome,
   onDeleteIncome,
-  availableCash
+  setup,
+  currentUserAccount,
+  simpanan = [],
+  pinjaman = [],
+  angsuran = []
 }: AdminWarungViewProps) {
   // Navigation tabs for Unit Usaha Warung
-  const [subTab, setSubTab] = useState<'barang' | 'piutang' | 'pembelian' | 'penjualan'>('barang');
+  const [subTab, setSubTab] = useState<'pos' | 'barang' | 'penjualan' | 'pembelian' | 'piutang'>('pos');
+
+  const [deleteModalState, setDeleteModalState] = useState<{
+    isOpen: boolean;
+    itemType: string;
+    itemName: string;
+    itemDetails?: { label: string; value: string; isHighlight?: boolean }[];
+    warningMessage?: string;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
 
   // Barang states
   const [editingBarang, setEditingBarang] = useState<WarungBarang | null>(null);
   const [showBarangForm, setShowBarangForm] = useState(false);
+  const [showLabelRakModal, setShowLabelRakModal] = useState(false);
+  const [showCameraScanner, setShowCameraScanner] = useState(false);
+  const [showCameraScannerInForm, setShowCameraScannerInForm] = useState(false);
   const [barangNama, setBarangNama] = useState('');
-  const [barangHarga, setBarangHarga] = useState('');
+  const [barangHargaPokok, setBarangHargaPokok] = useState(''); // Harga Pokok / Modal (HPP)
+  const [barangHarga, setBarangHarga] = useState(''); // Harga Jual Konsumen
   const [barangDeskripsi, setBarangDeskripsi] = useState('');
   const [barangFoto, setBarangFoto] = useState('');
   const [barangStok, setBarangStok] = useState('');
   const [barangSatuan, setBarangSatuan] = useState('pcs');
   const [customSatuan, setCustomSatuan] = useState('');
+  const [barangKode, setBarangKode] = useState('');
+  const [barangKategori, setBarangKategori] = useState('Sembako');
   const [isDragOverBarang, setIsDragOverBarang] = useState(false);
+
+  // Valuation and Profit calculation for Warung Catalog
+  const { totalNilaiModalStok, totalNilaiJualStok, totalPotensiKeuntungan, marginRataRata } = useMemo(() => {
+    let modal = 0;
+    let jual = 0;
+    let untung = 0;
+    warungBarang.forEach(item => {
+      const stok = item.stok || 0;
+      const hpp = item.hargaPokok || 0;
+      const hj = item.harga || 0;
+      modal += hpp * stok;
+      jual += hj * stok;
+      untung += (hj - hpp) * stok;
+    });
+    const margin = modal > 0 ? (untung / modal) * 100 : 0;
+    return {
+      totalNilaiModalStok: modal,
+      totalNilaiJualStok: jual,
+      totalPotensiKeuntungan: untung,
+      marginRataRata: margin
+    };
+  }, [warungBarang]);
+
+  // Live profit calculation for barang form
+  const liveHpp = barangHargaPokok ? parseFloat(barangHargaPokok.replace(/\D/g, '')) || 0 : 0;
+  const liveHj = barangHarga ? parseFloat(barangHarga.replace(/\D/g, '')) || 0 : 0;
+  const liveKeuntungan = liveHj > 0 ? liveHj - liveHpp : 0;
+  const liveMarginPersen = liveHpp > 0 && liveHj > 0 ? ((liveHj - liveHpp) / liveHpp) * 100 : 0;
 
   // Form states for Piutang Warung
   const [piuAnggotaId, setPiuAnggotaId] = useState('');
@@ -74,14 +128,6 @@ export function AdminWarungView({
   const [pemPrice, setPemPrice] = useState('');
   const [pemNotes, setPemNotes] = useState('');
 
-  // Edit Pembelian States
-  const [editingPembelian, setEditingPembelian] = useState<Pembelian | null>(null);
-  const [editPemDate, setEditPemDate] = useState('');
-  const [editPemName, setEditPemName] = useState('');
-  const [editPemQty, setEditPemQty] = useState('1');
-  const [editPemPrice, setEditPemPrice] = useState('');
-  const [editPemNotes, setEditPemNotes] = useState('');
-
   // Form states for Penjualan
   const [penDate, setPenDate] = useState(new Date().toISOString().substring(0, 10));
   const [penType, setPenType] = useState<'tunai' | 'kredit'>('tunai');
@@ -91,14 +137,67 @@ export function AdminWarungView({
 
   // Search filter query
   const [searchQuery, setSearchQuery] = useState('');
+  const [piuMemberSearch, setPiuMemberSearch] = useState('');
+  const [penMemberSearch, setPenMemberSearch] = useState('');
 
-  // Auto-select first member for Piutang & Penjualan Form if not set
+  const sortedMembers = useMemo(() => sortMembersNaturally(members), [members]);
+
+  // Mapping saldo piutang warung per anggota
+  const memberPiutangMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    piutangWarung.forEach(pw => {
+      if (!pw.anggotaId) return;
+      const delta = pw.jenis === 'hutang_baru' ? (Number(pw.nominal) || 0) : -(Number(pw.nominal) || 0);
+      map[pw.anggotaId] = (map[pw.anggotaId] || 0) + delta;
+    });
+    return map;
+  }, [piutangWarung]);
+
+  // Anggota terfilter untuk Piutang Form:
+  // - Pada mode 'pelunasan': hanya anggota yang masih memiliki sisa piutang (> 0)
+  // - Pada mode 'hutang_baru': semua anggota
+  const piuFilteredMembers = useMemo(() => {
+    const base = piuJenis === 'pelunasan'
+      ? sortedMembers.filter(m => (memberPiutangMap[m.id] || 0) > 0)
+      : sortedMembers;
+
+    if (!piuMemberSearch.trim()) return base;
+    const q = piuMemberSearch.toLowerCase().trim();
+    return base.filter(m =>
+      m.nama.toLowerCase().includes(q) ||
+      m.noAnggota.toLowerCase().includes(q) ||
+      (m.noHp && m.noHp.includes(q))
+    );
+  }, [sortedMembers, piuJenis, memberPiutangMap, piuMemberSearch]);
+
+  const penFilteredMembers = useMemo(() => {
+    if (!penMemberSearch.trim()) return sortedMembers;
+    const q = penMemberSearch.toLowerCase().trim();
+    return sortedMembers.filter(m =>
+      m.nama.toLowerCase().includes(q) ||
+      m.noAnggota.toLowerCase().includes(q) ||
+      (m.noHp && m.noHp.includes(q))
+    );
+  }, [sortedMembers, penMemberSearch]);
+
+  // Auto-select member for Piutang Form
   React.useEffect(() => {
-    if (members && members.length > 0) {
-      if (!piuAnggotaId) setPiuAnggotaId(members[0].id);
-      if (!penAnggotaId) setPenAnggotaId(members[0].id);
+    if (piuFilteredMembers.length > 0) {
+      const exists = piuFilteredMembers.some(m => m.id === piuAnggotaId);
+      if (!exists) {
+        setPiuAnggotaId(piuFilteredMembers[0].id);
+      }
+    } else {
+      setPiuAnggotaId('');
     }
-  }, [members, piuAnggotaId, penAnggotaId]);
+  }, [piuFilteredMembers, piuAnggotaId]);
+
+  // Auto-select member for Penjualan Form
+  React.useEffect(() => {
+    if (sortedMembers && sortedMembers.length > 0) {
+      if (!penAnggotaId) setPenAnggotaId(sortedMembers[0].id);
+    }
+  }, [sortedMembers, penAnggotaId]);
 
   // File Upload Handlers
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -136,9 +235,10 @@ export function AdminWarungView({
       return;
     }
 
-    const priceNum = parseFloat(barangHarga);
+    const priceNum = parseFloat(barangHarga.replace(/\D/g, ''));
+    const hppNum = barangHargaPokok ? parseFloat(barangHargaPokok.replace(/\D/g, '')) : undefined;
     if (isNaN(priceNum) || priceNum <= 0) {
-      alert("Harga barang harus berupa angka positif!");
+      alert("Harga jual barang harus berupa angka positif!");
       return;
     }
 
@@ -153,11 +253,14 @@ export function AdminWarungView({
 
     const itemData = {
       namaBarang: barangNama,
+      hargaPokok: hppNum && hppNum > 0 ? hppNum : undefined,
       harga: priceNum,
       deskripsi: barangDeskripsi,
       fotoUrl: finalFotoUrl || "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=300&q=80",
       stok: barangStok ? parseInt(barangStok) : 99,
-      satuan: barangSatuan === 'lainnya' ? customSatuan : barangSatuan
+      satuan: barangSatuan === 'lainnya' ? customSatuan : barangSatuan,
+      kodeBarang: barangKode.trim() || undefined,
+      kategori: barangKategori.trim() || undefined
     };
 
     if (editingBarang) {
@@ -172,7 +275,7 @@ export function AdminWarungView({
   // Submit Piutang Warung
   const handlePiutangSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const nom = parseFloat(piuNominal);
+    const nom = parseFloat(piuNominal.replace(/\D/g, ''));
     if (isNaN(nom) || nom <= 0 || !piuAnggotaId) {
       alert("Harap lengkapi data piutang dengan nominal yang valid!");
       return;
@@ -183,27 +286,21 @@ export function AdminWarungView({
       tanggal: piuDate,
       jenis: piuJenis,
       nominal: nom,
-      keterangan: piuNotes.trim() || (piuJenis === 'hutang_baru' ? "Belanja Kredit Toko/Warung" : "Pelunasan Piutang Toko/Warung")
+      keterangan: piuNotes.trim() || (piuJenis === 'hutang_baru' ? "Belanja Kredit Toko/Warung" : "Pembayaran Piutang Toko/Warung")
     });
 
     setPiuNominal('');
     setPiuNotes('');
-    alert("Transaksi Piutang Warung berhasil disimpan!");
+    alert(piuJenis === 'hutang_baru' ? "Pencatatan piutang baru berhasil disimpan!" : "Pembayaran piutang warung berhasil disimpan! (Mengurangi piutang anggota & menambah Kas)");
   };
 
   // Submit Pembelian
   const handlePembelianSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const qty = parseInt(pemQty);
-    const prc = parseFloat(pemPrice);
+    const prc = parseFloat(pemPrice.replace(/\D/g, ''));
     if (isNaN(qty) || qty <= 0 || isNaN(prc) || prc <= 0 || !pemName.trim()) {
       alert("Harap lengkapi formulir pembelian dengan nilai yang valid!");
-      return;
-    }
-
-    const total = qty * prc;
-    if (availableCash !== undefined && total > availableCash) {
-      alert(`Transaksi Gagal!\n\nSaldo kas tidak mencukupi untuk melakukan restock warung.\n\nSaldo Kas Saat Ini: ${formatRupiah(availableCash)}\nTotal Restock: ${formatRupiah(total)}\n\nSilakan kurangi kuantitas atau harga satuan.`);
       return;
     }
 
@@ -213,7 +310,7 @@ export function AdminWarungView({
       kategori: 'persediaan_warung',
       kuantitas: qty,
       hargaSatuan: prc,
-      totalHarga: total,
+      totalHarga: qty * prc,
       keterangan: pemNotes.trim() || `Pembelian ${pemName.trim()}`
     });
 
@@ -221,12 +318,13 @@ export function AdminWarungView({
     setPemQty('1');
     setPemPrice('');
     setPemNotes('');
+    alert("Transaksi Pembelian/Restock Warung berhasil disimpan!");
   };
 
   // Submit Penjualan
   const handlePenjualanSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const nom = parseFloat(penNominal);
+    const nom = parseFloat(penNominal.replace(/\D/g, ''));
     if (isNaN(nom) || nom <= 0) {
       alert("Harap lengkapi data penjualan dengan nominal yang valid!");
       return;
@@ -255,27 +353,34 @@ export function AdminWarungView({
 
     setPenNominal('');
     setPenNotes('');
+    alert("Transaksi Penjualan Warung berhasil disimpan!");
   };
 
   const resetBarangForm = () => {
     setEditingBarang(null);
     setShowBarangForm(false);
     setBarangNama('');
+    setBarangHargaPokok('');
     setBarangHarga('');
     setBarangDeskripsi('');
     setBarangFoto('');
     setBarangStok('');
     setBarangSatuan('pcs');
     setCustomSatuan('');
+    setBarangKode('');
+    setBarangKategori('Sembako');
   };
 
   const startEditBarang = (item: WarungBarang) => {
     setEditingBarang(item);
     setBarangNama(item.namaBarang);
-    setBarangHarga(String(item.harga));
+    setBarangHargaPokok(item.hargaPokok ? item.hargaPokok.toLocaleString('id-ID') : '');
+    setBarangHarga(item.harga ? item.harga.toLocaleString('id-ID') : '');
     setBarangDeskripsi(item.deskripsi);
     setBarangFoto(item.fotoUrl || '');
     setBarangStok(item.stok ? String(item.stok) : '');
+    setBarangKode(item.kodeBarang || '');
+    setBarangKategori(item.kategori || 'Sembako');
     
     const standardUnits = ['pcs', 'liter', 'Kg', 'gram', 'bungkus', 'dus'];
     if (item.satuan) {
@@ -374,13 +479,21 @@ export function AdminWarungView({
               </p>
             </div>
           </div>
-          <div className="flex gap-2">
-            <div className="bg-white/10 backdrop-blur-md px-4 py-2 rounded-xl text-center min-w-[120px]">
+          <div className="flex flex-wrap sm:flex-nowrap gap-2 items-center">
+            <button
+              id="btn-buka-kasir-pos"
+              onClick={() => { setSubTab('pos'); setSearchQuery(''); }}
+              className="bg-emerald-500 hover:bg-emerald-400 text-white font-bold px-3.5 py-2 rounded-xl text-xs flex items-center gap-2 transition cursor-pointer shadow-sm border border-emerald-300/40 active:scale-95"
+            >
+              <ShoppingCart className="w-4 h-4" />
+              <span>Buka Mesin Kasir POS</span>
+            </button>
+            <div className="bg-white/10 backdrop-blur-md px-3.5 py-2 rounded-xl text-center min-w-[100px]">
               <span className="text-[10px] text-emerald-200 block uppercase font-mono">Total Produk</span>
               <span className="text-sm font-bold font-mono">{warungBarang.length} Item</span>
             </div>
-            <div className="bg-white/10 backdrop-blur-md px-4 py-2 rounded-xl text-center min-w-[124px]">
-              <span className="text-[10px] text-emerald-250 block uppercase font-mono">Baki Piutang Warung</span>
+            <div className="bg-white/10 backdrop-blur-md px-3.5 py-2 rounded-xl text-center min-w-[115px]">
+              <span className="text-[10px] text-emerald-250 block uppercase font-mono">Sisa Piutang</span>
               <span className="text-sm font-bold font-mono text-amber-200">{formatRupiah(Math.max(0, totalPiutangSum))}</span>
             </div>
           </div>
@@ -390,6 +503,22 @@ export function AdminWarungView({
       {/* Navigation Sub-Tabs */}
       <div className="flex flex-wrap border-b border-slate-200 dark:border-slate-750 gap-4">
         <button 
+          id="tab-pos"
+          onClick={() => { setSubTab('pos'); setSearchQuery(''); }}
+          className={`pb-2.5 text-xs font-bold leading-none cursor-pointer border-b-2 transition flex items-center gap-1.5 ${
+            subTab === 'pos' 
+              ? 'border-emerald-700 text-emerald-700 dark:text-emerald-400 font-extrabold' 
+              : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+          }`}
+        >
+          <ShoppingCart className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+          <span>Kasir POS (Point of Sale)</span>
+          <span className="px-1.5 py-0.5 bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 text-[9px] font-black rounded-full uppercase tracking-wider">
+            POS
+          </span>
+        </button>
+        <button 
+          id="tab-barang"
           onClick={() => { setSubTab('barang'); setSearchQuery(''); }}
           className={`pb-2.5 text-xs font-bold leading-none cursor-pointer border-b-2 transition ${
             subTab === 'barang' 
@@ -400,6 +529,19 @@ export function AdminWarungView({
           <span className="flex items-center gap-2">🛍️ Katalog & Stok Barang</span>
         </button>
         <button 
+          id="tab-label-rak"
+          onClick={() => setShowLabelRakModal(true)}
+          className="pb-2.5 text-xs font-bold leading-none cursor-pointer border-b-2 transition border-transparent text-slate-500 hover:text-slate-800 flex items-center gap-1.5"
+          title="Buka Cetak Label Harga Rak & Barcode Stiker"
+        >
+          <Tag className="w-3.5 h-3.5 text-emerald-600" />
+          <span>🏷️ Label Rak & Barcode</span>
+          <span className="px-1.5 py-0.5 bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 text-[9px] font-black rounded-full uppercase tracking-wider">
+            Cetak
+          </span>
+        </button>
+        <button 
+          id="tab-penjualan"
           onClick={() => { setSubTab('penjualan'); setSearchQuery(''); }}
           className={`pb-2.5 text-xs font-bold leading-none cursor-pointer border-b-2 transition ${
             subTab === 'penjualan' 
@@ -407,9 +549,10 @@ export function AdminWarungView({
               : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
-          <span className="flex items-center gap-2">📤 Catatan Penjualan (Tunai/Kredit)</span>
+          <span className="flex items-center gap-2">📤 Catatan Penjualan</span>
         </button>
         <button 
+          id="tab-pembelian"
           onClick={() => { setSubTab('pembelian'); setSearchQuery(''); }}
           className={`pb-2.5 text-xs font-bold leading-none cursor-pointer border-b-2 transition ${
             subTab === 'pembelian' 
@@ -420,6 +563,7 @@ export function AdminWarungView({
           <span className="flex items-center gap-2">📥 Catatan Pembelian Stok</span>
         </button>
         <button 
+          id="tab-piutang"
           onClick={() => { setSubTab('piutang'); setSearchQuery(''); }}
           className={`pb-2.5 text-xs font-bold leading-none cursor-pointer border-b-2 transition ${
             subTab === 'piutang' 
@@ -431,26 +575,46 @@ export function AdminWarungView({
         </button>
       </div>
 
-      {/* Searching Bar */}
-      <div className="bg-white dark:bg-slate-850 p-4 rounded-xl border border-slate-150 dark:border-slate-800 flex gap-3 items-center shadow-xs">
-        <div className="relative flex-1">
-          <span className="absolute left-3 top-2.5 text-slate-400"><Search className="w-4 h-4" /></span>
-          <input 
-            type="text" 
-            placeholder={
-              subTab === 'barang' ? "Cari produk, deskripsi barang..." :
-              subTab === 'piutang' ? "Cari nama debitur, mutasi piutang..." :
-              subTab === 'pembelian' ? "Cari nama barang pembelian, keterangan..." :
-              "Cari nama pembeli, keterangan penjualan..."
-            }
-            className="w-full pl-9 pr-4 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-800 focus:outline-emerald-600 rounded-lg placeholder-slate-400"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+      {/* Searching Bar (Only displayed for non-POS tabs) */}
+      {subTab !== 'pos' && (
+        <div className="bg-white dark:bg-slate-850 p-4 rounded-xl border border-slate-150 dark:border-slate-800 flex gap-3 items-center shadow-xs">
+          <div className="relative flex-1">
+            <span className="absolute left-3 top-2.5 text-slate-400"><Search className="w-4 h-4" /></span>
+            <input 
+              type="text" 
+              placeholder={
+                subTab === 'barang' ? "Cari produk, deskripsi barang..." :
+                subTab === 'piutang' ? "Cari nama debitur, mutasi piutang..." :
+                subTab === 'pembelian' ? "Cari nama barang pembelian, keterangan..." :
+                "Cari nama pembeli, keterangan penjualan..."
+              }
+              className="w-full pl-9 pr-4 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-800 focus:outline-emerald-600 rounded-lg placeholder-slate-400"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* Tab Contents: POS or regular 3-col grid */}
+      {subTab === 'pos' ? (
+        <WarungPOSView 
+          warungBarang={warungBarang}
+          members={members}
+          piutangWarung={piutangWarung}
+          setup={setup}
+          currentUserAccount={currentUserAccount}
+          onAddIncome={onAddIncome}
+          onAddPiutang={onAddPiutang}
+          onEditBarang={onEditBarang}
+          onOpenCatalogTab={() => setSubTab('barang')}
+          simpanan={simpanan}
+          income={income}
+          pinjaman={pinjaman}
+          angsuran={angsuran}
+        />
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {subTab === 'barang' && (
           <>
             {/* Goods List Column (Span 2 or 3 depending on form status) */}
@@ -462,15 +626,65 @@ export function AdminWarungView({
                     Katalog Barang Usaha Warung
                   </h3>
                   {!showBarangForm && (
-                    <button 
-                      id="btn-tambah-barang"
-                      onClick={() => { resetBarangForm(); setShowBarangForm(true); }}
-                      className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl transition cursor-pointer"
-                    >
-                      <Plus className="w-4 h-4" />
-                      Tambah Barang
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        id="btn-scan-kamera-admin"
+                        onClick={() => setShowCameraScanner(true)}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-750 dark:text-slate-250 text-xs font-bold rounded-xl transition cursor-pointer border border-slate-200 dark:border-slate-700 shadow-2xs"
+                        title="Scan Barcode menggunakan Kamera HP / Tablet / Laptop"
+                      >
+                        <Camera className="w-4 h-4 text-emerald-600" />
+                        <span className="hidden sm:inline">Scan Kamera</span>
+                      </button>
+
+                      <button 
+                        id="btn-cetak-label-admin"
+                        onClick={() => setShowLabelRakModal(true)}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-xs font-bold rounded-xl transition cursor-pointer border border-emerald-300 dark:border-emerald-800 shadow-2xs"
+                        title="Buka Cetak Label Harga Rak & Barcode Stiker"
+                      >
+                        <Tag className="w-4 h-4 text-emerald-600" />
+                        <span>Cetak Label & Barcode</span>
+                      </button>
+
+                      <button 
+                        id="btn-tambah-barang"
+                        onClick={() => { resetBarangForm(); setShowBarangForm(true); }}
+                        className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-2xs"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Tambah Barang</span>
+                      </button>
+                    </div>
                   )}
+                </div>
+
+                {/* Valuation & Profit Metric Bar */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4 p-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl border border-slate-200 dark:border-slate-800">
+                  <div className="p-2 bg-white dark:bg-slate-800/90 rounded-lg border border-slate-150 dark:border-slate-750">
+                    <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400 dark:text-slate-500">Varian Produk</p>
+                    <p className="text-sm font-bold text-slate-800 dark:text-slate-100 font-mono mt-0.5">{warungBarang.length} <span className="text-[10px] font-normal text-slate-400">item</span></p>
+                  </div>
+                  <div className="p-2 bg-white dark:bg-slate-800/90 rounded-lg border border-slate-150 dark:border-slate-750">
+                    <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                      <Coins className="w-3 h-3 text-amber-500" /> Modal Stok (HPP)
+                    </p>
+                    <p className="text-sm font-bold text-slate-700 dark:text-slate-200 font-mono mt-0.5">{formatRupiah(totalNilaiModalStok)}</p>
+                  </div>
+                  <div className="p-2 bg-white dark:bg-slate-800/90 rounded-lg border border-slate-150 dark:border-slate-750">
+                    <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                      <Tag className="w-3 h-3 text-blue-500" /> Nilai Jual Stok
+                    </p>
+                    <p className="text-sm font-bold text-slate-800 dark:text-slate-100 font-mono mt-0.5">{formatRupiah(totalNilaiJualStok)}</p>
+                  </div>
+                  <div className="p-2 bg-emerald-50/70 dark:bg-emerald-950/40 rounded-lg border border-emerald-200 dark:border-emerald-800/60">
+                    <p className="text-[10px] uppercase tracking-wider font-bold text-emerald-700 dark:text-emerald-400 flex items-center gap-1">
+                      <TrendingUp className="w-3 h-3 text-emerald-600" /> Potensi Laba
+                    </p>
+                    <p className="text-sm font-bold text-emerald-600 dark:text-emerald-400 font-mono mt-0.5">
+                      +{formatRupiah(totalPotensiKeuntungan)}
+                    </p>
+                  </div>
                 </div>
 
                 {filteredBarang.length === 0 ? (
@@ -481,55 +695,148 @@ export function AdminWarungView({
                   </div>
                 ) : (
                   <div className={`grid grid-cols-1 ${showBarangForm ? 'sm:grid-cols-2' : 'sm:grid-cols-3'} gap-4`}>
-                    {filteredBarang.map((item) => (
-                      <motion.div 
-                        key={item.id}
-                        layout
-                        id={`barang-item-${item.id}`}
-                        className="flex gap-4 p-4 bg-slate-50 dark:bg-slate-900/40 rounded-xl border border-slate-150 dark:border-slate-800 relative hover:shadow-md transition-shadow group"
-                      >
-                        <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
-                          <img 
-                            src={item.fotoUrl || "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=300&q=80"} 
-                            alt={item.namaBarang} 
-                            className="w-full h-full object-cover"
-                            referrerPolicy="no-referrer"
-                          />
-                        </div>
-                        <div className="flex-1 min-w-0 pr-8">
-                          <h4 className="font-bold text-slate-850 dark:text-slate-100 text-xs truncate" title={item.namaBarang}>{item.namaBarang}</h4>
-                          <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-1">{formatRupiah(item.harga)}</p>
-                          <p className="text-[10px] text-slate-450 mt-1 line-clamp-2 leading-relaxed">{item.deskripsi}</p>
-                          {item.stok !== undefined && (
-                            <span className="inline-block mt-1.5 text-[9px] font-mono font-bold bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-600 dark:text-slate-400">
-                              Stok: {item.stok} {item.satuan || 'pcs'}
-                            </span>
-                          )}
-                        </div>
+                    {filteredBarang.map((item) => {
+                      const hpp = item.hargaPokok || 0;
+                      const untungPerUnit = item.harga - hpp;
+                      const marginPersen = hpp > 0 ? (untungPerUnit / hpp) * 100 : 0;
+                      const totalPotensiLaba = item.stok !== undefined ? untungPerUnit * item.stok : 0;
 
-                        {/* action buttons */}
-                        <div className="absolute top-2 right-2 flex items-center gap-1 bg-white/90 dark:bg-slate-800/90 rounded-lg p-1 border border-slate-100 dark:border-slate-700 shadow-xs">
-                          <button 
-                            id={`btn-edit-barang-${item.id}`}
-                            onClick={() => startEditBarang(item)}
-                            className="p-1 text-slate-500 hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-400 transition"
-                            title="Ubah"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button 
-                            id={`btn-delete-barang-${item.id}`}
-                            onClick={() => {
-                              if (window.confirm(`Hapus ${item.namaBarang} dari warung?`)) onDeleteBarang(item.id);
-                            }}
-                            className="p-1 text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 transition"
-                            title="Hapus"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </motion.div>
-                    ))}
+                      return (
+                        <motion.div 
+                          key={item.id}
+                          layout
+                          id={`barang-item-${item.id}`}
+                          className="flex flex-col p-4 bg-slate-50 dark:bg-slate-900/40 rounded-xl border border-slate-150 dark:border-slate-800 relative hover:shadow-md transition-shadow group"
+                        >
+                          <div className="flex gap-3">
+                            <div className="w-14 h-14 rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
+                              <img 
+                                src={item.fotoUrl || "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=300&q=80"} 
+                                alt={item.namaBarang} 
+                                className="w-full h-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                            </div>
+                            <div className="flex-1 min-w-0 pr-12">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <h4 className="font-bold text-slate-850 dark:text-slate-100 text-xs truncate" title={item.namaBarang}>{item.namaBarang}</h4>
+                                {item.kategori && (
+                                  <span className="text-[9px] px-1.5 py-0.2 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 rounded font-medium">
+                                    {item.kategori}
+                                  </span>
+                                )}
+                              </div>
+                              {item.kodeBarang && (
+                                <p className="text-[9px] font-mono text-slate-400 dark:text-slate-500 mt-0.5 flex items-center gap-1">
+                                  <Barcode className="w-3 h-3 inline" /> {item.kodeBarang}
+                                </p>
+                              )}
+                              <p className="text-[10px] text-slate-450 mt-1 line-clamp-1 leading-relaxed">{item.deskripsi}</p>
+                            </div>
+                          </div>
+
+                          {/* Detail Harga Pokok, Harga Jual, dan Selisih Keuntungan */}
+                          <div className="mt-3 p-2.5 bg-white dark:bg-slate-800/90 rounded-lg border border-slate-150 dark:border-slate-750 text-[11px] space-y-1.5">
+                            <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                              <span className="text-[10px] flex items-center gap-1">
+                                <Coins className="w-3 h-3 text-amber-500" />
+                                Harga Pokok (HPP):
+                              </span>
+                              <span className="font-mono font-medium text-slate-700 dark:text-slate-300">
+                                {item.hargaPokok ? formatRupiah(item.hargaPokok) : <span className="italic text-slate-400">Belum diisi</span>}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between text-slate-700 dark:text-slate-200">
+                              <span className="text-[10px] font-semibold flex items-center gap-1">
+                                <Tag className="w-3 h-3 text-blue-500" />
+                                Harga Jual:
+                              </span>
+                              <span className="font-mono font-bold text-slate-900 dark:text-slate-100">
+                                {formatRupiah(item.harga)}
+                              </span>
+                            </div>
+                            <div className="pt-1.5 border-t border-dashed border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                              <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 flex items-center gap-1">
+                                <TrendingUp className="w-3 h-3 text-emerald-600" />
+                                Laba / Unit:
+                              </span>
+                              <span className={`font-mono font-bold text-[11px] ${
+                                untungPerUnit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                              }`}>
+                                {item.hargaPokok !== undefined ? (
+                                  <>
+                                    {untungPerUnit >= 0 ? `+${formatRupiah(untungPerUnit)}` : formatRupiah(untungPerUnit)}
+                                    {hpp > 0 && (
+                                      <span className="text-[9px] font-normal ml-1 opacity-80">
+                                        ({marginPersen >= 0 ? `+${marginPersen.toFixed(0)}%` : `${marginPersen.toFixed(0)}%`})
+                                      </span>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="text-slate-400 font-normal text-[10px]">Perlu modal</span>
+                                )}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Baris Bawah: Stok & Potensi Laba */}
+                          <div className="mt-2.5 pt-2 border-t border-slate-150 dark:border-slate-800 flex items-center justify-between text-[10px] flex-wrap gap-1">
+                            <span className="font-mono font-bold bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-600 dark:text-slate-400">
+                              Stok: {item.stok ?? 0} {item.satuan || 'pcs'}
+                            </span>
+                            {item.hargaPokok !== undefined && item.stok !== undefined && item.stok > 0 && (
+                              <span className="font-mono text-slate-450 dark:text-slate-400" title="Potensi laba bila seluruh stok terjual">
+                                Potensi: <b className="text-emerald-600 dark:text-emerald-400 font-semibold">{formatRupiah(totalPotensiLaba)}</b>
+                              </span>
+                            )}
+                          </div>
+
+                          {/* action buttons */}
+                          <div className="absolute top-2 right-2 flex items-center gap-1 bg-white/90 dark:bg-slate-800/90 rounded-lg p-1 border border-slate-100 dark:border-slate-700 shadow-xs">
+                            <button 
+                              id={`btn-label-barang-${item.id}`}
+                              onClick={() => setShowLabelRakModal(true)}
+                              className="p-1 text-slate-500 hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-400 transition"
+                              title="Cetak Label Rak & Barcode"
+                            >
+                              <Tag className="w-3.5 h-3.5" />
+                            </button>
+                            <button 
+                              id={`btn-edit-barang-${item.id}`}
+                              onClick={() => startEditBarang(item)}
+                              className="p-1 text-slate-500 hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-400 transition"
+                              title="Ubah"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button 
+                              id={`btn-delete-barang-${item.id}`}
+                              onClick={() => {
+                                setDeleteModalState({
+                                  isOpen: true,
+                                  itemType: 'Barang Warung',
+                                  itemName: item.namaBarang,
+                                  itemDetails: [
+                                    { label: 'Kode Barang', value: item.kodeBarang || '-' },
+                                    { label: 'Kategori', value: item.kategori || '-' },
+                                    { label: 'Sisa Stok', value: `${item.stok ?? 0} ${item.satuan || 'pcs'}` },
+                                    { label: 'Harga Jual', value: formatRupiah(item.harga), isHighlight: true }
+                                  ],
+                                  warningMessage: 'Data barang akan dihapus dari etalase kasir POS dan inventaris warung.',
+                                  onConfirm: async () => {
+                                    await onDeleteBarang(item.id);
+                                  }
+                                });
+                              }}
+                              className="p-1 text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 transition cursor-pointer"
+                              title="Hapus"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </motion.div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -569,28 +876,107 @@ export function AdminWarungView({
                       />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1">
-                        <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Harga (Rp) *</label>
-                        <input 
-                          type="number" 
-                          required
-                          placeholder="Contoh: 17500"
-                          className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-sans"
-                          value={barangHarga}
-                          onChange={(e) => setBarangHarga(e.target.value)}
-                        />
+                    {/* Pricing & Profit Section */}
+                    <div className="p-3.5 bg-slate-50 dark:bg-slate-900/60 rounded-xl border border-slate-200 dark:border-slate-750 space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-600 dark:text-slate-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                            <Coins className="w-3 h-3 text-amber-500" />
+                            Harga Pokok (Modal / HPP)
+                          </label>
+                          <div className="relative">
+                            <span className="absolute left-2.5 top-2 text-[11px] text-slate-400 font-bold">Rp</span>
+                            <input 
+                              type="text" 
+                              placeholder="Contoh: 15.000"
+                              className="w-full pl-8 pr-3 py-1.5 text-xs border rounded-lg bg-white dark:bg-slate-850 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-mono"
+                              value={barangHargaPokok}
+                              onChange={(e) => {
+                                const raw = e.target.value.replace(/\D/g, '');
+                                setBarangHargaPokok(raw ? parseInt(raw, 10).toLocaleString('id-ID') : '');
+                              }}
+                            />
+                          </div>
+                          <p className="text-[9px] text-slate-450">Biaya modal/kulakan per unit</p>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-emerald-700 dark:text-emerald-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                            <Tag className="w-3 h-3 text-emerald-600" />
+                            Harga Jual Konsumen *
+                          </label>
+                          <div className="relative">
+                            <span className="absolute left-2.5 top-2 text-[11px] text-emerald-600 dark:text-emerald-400 font-bold">Rp</span>
+                            <input 
+                              type="text" 
+                              required
+                              placeholder="Contoh: 17.500"
+                              className="w-full pl-8 pr-3 py-1.5 text-xs border rounded-lg bg-white dark:bg-slate-850 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300 font-bold font-mono"
+                              value={barangHarga}
+                              onChange={(e) => {
+                                const raw = e.target.value.replace(/\D/g, '');
+                                setBarangHarga(raw ? parseInt(raw, 10).toLocaleString('id-ID') : '');
+                              }}
+                            />
+                          </div>
+                          <p className="text-[9px] text-slate-450">Harga jual eceran di warung</p>
+                        </div>
                       </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Stok Barang</label>
-                        <input 
-                          type="number" 
-                          placeholder="Contoh: 50"
-                          className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-sans"
-                          value={barangStok}
-                          onChange={(e) => setBarangStok(e.target.value)}
-                        />
+
+                      {/* Live Profit Calculation Card */}
+                      <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-500 dark:text-slate-400 text-[10px] font-semibold flex items-center gap-1">
+                            <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+                            Selisih Keuntungan (Laba/Unit):
+                          </span>
+                          <span className={`font-mono font-bold text-xs ${
+                            liveKeuntungan > 0 ? 'text-emerald-600 dark:text-emerald-400' :
+                            liveKeuntungan < 0 ? 'text-rose-600 dark:text-rose-400' :
+                            'text-slate-400'
+                          }`}>
+                            {liveHj > 0 ? (
+                              <>
+                                {liveKeuntungan >= 0 ? `+${formatRupiah(liveKeuntungan)}` : formatRupiah(liveKeuntungan)}
+                                {liveHpp > 0 && (
+                                  <span className="text-[9px] ml-1 font-normal opacity-85">
+                                    ({liveMarginPersen >= 0 ? `+${liveMarginPersen.toFixed(1)}%` : `${liveMarginPersen.toFixed(1)}%`})
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-[10px] text-slate-400 font-normal">Masukkan harga jual</span>
+                            )}
+                          </span>
+                        </div>
+
+                        {liveKeuntungan < 0 && (
+                          <div className="mt-1.5 p-1.5 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded text-[10px] text-rose-600 dark:text-rose-400 flex items-center gap-1">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                            <span>Peringatan: Harga jual di bawah modal! Warung mengalami rugi per unit.</span>
+                          </div>
+                        )}
+
+                        {liveKeuntungan > 0 && barangStok && parseInt(barangStok) > 0 && (
+                          <div className="flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400 mt-1 pt-1 border-t border-dashed border-slate-200 dark:border-slate-800">
+                            <span>Estimasi Total Keuntungan Stok ({barangStok} {barangSatuan}):</span>
+                            <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                              +{formatRupiah(liveKeuntungan * parseInt(barangStok))}
+                            </span>
+                          </div>
+                        )}
                       </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Stok Barang</label>
+                      <input 
+                        type="number" 
+                        placeholder="Contoh: 50"
+                        className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-sans"
+                        value={barangStok}
+                        onChange={(e) => setBarangStok(e.target.value)}
+                      />
                     </div>
 
                     <div className="grid grid-cols-2 gap-4">
@@ -634,6 +1020,62 @@ export function AdminWarungView({
                           />
                         </div>
                       )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1">
+                          <Barcode className="w-3 h-3 text-slate-400" />
+                          Barcode / SKU (Opsional)
+                        </label>
+                        <div className="flex gap-1.5">
+                          <input 
+                            type="text" 
+                            placeholder="Contoh: 8991001..."
+                            className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-mono text-xs"
+                            value={barangKode}
+                            onChange={(e) => setBarangKode(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowCameraScannerInForm(true)}
+                            className="px-2 py-1.5 bg-emerald-100 hover:bg-emerald-200 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0 cursor-pointer shadow-2xs"
+                            title="Scan Barcode kemasan menggunakan Kamera HP/Tablet/Laptop"
+                          >
+                            <Camera className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Scan</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const autoCode = generateStoreEan13(Date.now() % 1000000);
+                              setBarangKode(autoCode);
+                            }}
+                            className="px-2 py-1.5 bg-slate-200 hover:bg-slate-300 dark:bg-slate-750 text-slate-750 dark:text-slate-200 rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0 cursor-pointer shadow-2xs"
+                            title="Generate kode barcode EAN-13 internal otomatis"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                            <span className="hidden sm:inline">Auto</span>
+                          </button>
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider flex items-center gap-1">
+                          <Tag className="w-3 h-3 text-slate-400" />
+                          Kategori Produk
+                        </label>
+                        <select 
+                          className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-sans text-xs"
+                          value={barangKategori}
+                          onChange={(e) => setBarangKategori(e.target.value)}
+                        >
+                          <option value="Sembako">Sembako</option>
+                          <option value="Minuman">Minuman</option>
+                          <option value="Makanan">Makanan</option>
+                          <option value="Perlengkapan">Perlengkapan / ATK</option>
+                          <option value="Lain-lain">Lain-lain</option>
+                        </select>
+                      </div>
                     </div>
 
                     <div className="space-y-1">
@@ -744,15 +1186,58 @@ export function AdminWarungView({
                 <form onSubmit={handlePiutangSubmit} className="space-y-3.5 text-xs font-medium">
                   <div className="space-y-1">
                     <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Pilih Anggota Debitur</label>
-                    <select
-                      className="w-full px-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-800 focus:outline-emerald-600 font-semibold"
-                      value={piuAnggotaId}
-                      onChange={(e) => setPiuAnggotaId(e.target.value)}
-                    >
-                      {members.map(m => (
-                        <option key={m.id} value={m.id}>{m.noAnggota} - {m.nama}</option>
-                      ))}
-                    </select>
+                    <div className="space-y-1.5">
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Ketik untuk filter ID / Nama Anggota..."
+                          className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
+                          value={piuMemberSearch}
+                          onChange={(e) => setPiuMemberSearch(e.target.value)}
+                        />
+                      </div>
+                      <select
+                        className="w-full px-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-800 focus:outline-emerald-600 font-semibold"
+                        value={piuAnggotaId}
+                        onChange={(e) => setPiuAnggotaId(e.target.value)}
+                        disabled={piuFilteredMembers.length === 0}
+                      >
+                        <option value="">
+                          {piuJenis === 'pelunasan' 
+                            ? `-- Pilih Anggota Berpiutang (${piuFilteredMembers.length}) --` 
+                            : `-- Pilih Anggota (${piuFilteredMembers.length}) --`}
+                        </option>
+                        {piuFilteredMembers.map(m => (
+                          <option key={m.id} value={m.id}>
+                            {m.nama} ({m.noAnggota}) {piuJenis === 'pelunasan' ? ` - Sisa: ${formatRupiah(memberPiutangMap[m.id] || 0)}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {piuJenis === 'pelunasan' && piuFilteredMembers.length === 0 && (
+                        <p className="text-[11px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 p-2 rounded-lg border border-emerald-200 dark:border-emerald-800/40">
+                          ✓ Tidak ada anggota yang memiliki saldo piutang warung saat ini.
+                        </p>
+                      )}
+                      {piuJenis === 'pelunasan' && piuAnggotaId && (memberPiutangMap[piuAnggotaId] || 0) > 0 && (
+                        <div className="flex items-center justify-between p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/40 rounded-lg text-[11px]">
+                          <div>
+                            <span className="text-amber-800 dark:text-amber-300 font-medium">Sisa Piutang: </span>
+                            <span className="font-bold text-amber-900 dark:text-amber-200">{formatRupiah(memberPiutangMap[piuAnggotaId] || 0)}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const sisa = memberPiutangMap[piuAnggotaId] || 0;
+                              setPiuNominal(sisa.toLocaleString('id-ID'));
+                            }}
+                            className="px-2 py-0.5 text-[10px] font-bold bg-amber-600 hover:bg-amber-700 text-white rounded cursor-pointer transition shadow-xs"
+                          >
+                            Isi Bayar Penuh
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   <div className="space-y-1">
@@ -789,9 +1274,18 @@ export function AdminWarungView({
                             : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-650 dark:text-slate-350'
                         }`}
                       >
-                        <ArrowDownLeft className="w-3.5 h-3.5" /> Pelunasan
+                        <ArrowDownLeft className="w-3.5 h-3.5" /> Pembayaran Piutang
                       </button>
                     </div>
+                    {piuJenis === 'pelunasan' ? (
+                      <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium mt-1.5 bg-emerald-50/60 dark:bg-emerald-950/20 p-2 rounded-md border border-emerald-200/50 dark:border-emerald-800/50 leading-relaxed">
+                        ✓ Pembayaran ini akan <strong>mengurangi piutang anggota</strong> dan <strong>bertambah ke Kas Koperasi</strong>.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-amber-600 dark:text-amber-400 font-medium mt-1.5 bg-amber-50/60 dark:bg-amber-950/20 p-2 rounded-md border border-amber-200/50 dark:border-amber-800/50 leading-relaxed">
+                        ✓ Penambahan piutang baru (belanja kredit) anggota warung.
+                      </p>
+                    )}
                   </div>
 
                   <div className="space-y-1">
@@ -799,11 +1293,14 @@ export function AdminWarungView({
                     <div className="relative font-mono text-xs">
                       <span className="absolute left-3 top-2.5 text-slate-400 font-medium">Rp</span>
                       <input 
-                        type="number"
-                        placeholder="Contoh: 154000"
-                        className="w-full pl-9 pr-3 py-1.5 bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-800 focus:outline-emerald-600"
+                        type="text"
+                        placeholder="Contoh: 154.000"
+                        className="w-full pl-9 pr-3 py-1.5 bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-800 focus:outline-emerald-600 font-mono"
                         value={piuNominal}
-                        onChange={(e) => setPiuNominal(e.target.value)}
+                        onChange={(e) => {
+                          const raw = e.target.value.replace(/\D/g, '').slice(0, 15);
+                          setPiuNominal(raw ? parseInt(raw, 10).toLocaleString('id-ID') : '');
+                        }}
                         required
                       />
                     </div>
@@ -826,7 +1323,7 @@ export function AdminWarungView({
                       piuJenis === 'hutang_baru' ? 'bg-amber-700 hover:bg-amber-800' : 'bg-emerald-700 hover:bg-emerald-800'
                     }`}
                   >
-                    <Plus className="w-4 h-4"/> Simpan Piutang
+                    <Plus className="w-4 h-4"/> {piuJenis === 'hutang_baru' ? 'Simpan Piutang Baru' : 'Simpan Pembayaran Piutang'}
                   </button>
                 </form>
               </div>
@@ -877,11 +1374,11 @@ export function AdminWarungView({
                                 <td className="py-3 px-3">
                                   {pw.jenis === 'hutang_baru' ? (
                                     <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-800 dark:bg-amber-950/20 dark:text-amber-400">
-                                      <ArrowUpRight className="w-3 h-3" /> Utang Baru (+Baki)
+                                      <ArrowUpRight className="w-3 h-3" /> Utang Baru (+Piutang)
                                     </span>
                                   ) : (
                                     <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-400">
-                                      <ArrowDownLeft className="w-3 h-3" /> Pelunasan Sembako (-Baki)
+                                      <ArrowDownLeft className="w-3 h-3" /> Pembayaran Piutang (-Piutang, +Kas)
                                     </span>
                                   )}
                                 </td>
@@ -896,9 +1393,23 @@ export function AdminWarungView({
                                 <td className="py-3 px-3 text-center">
                                   <button 
                                     onClick={() => {
-                                      if(confirm("Apakah Anda yakin ingin menghapus catatan piutang warung ini?")) {
-                                        onDeletePiutang(pw.id);
-                                      }
+                                      const m = members.find(mem => mem.id === pw.anggotaId);
+                                      setDeleteModalState({
+                                        isOpen: true,
+                                        itemType: 'Catatan Piutang Warung',
+                                        itemName: `${pw.jenis === 'hutang_baru' ? 'Belanja Kasbon' : 'Pembayaran Piutang'} - ${formatRupiah(pw.nominal)}`,
+                                        itemDetails: [
+                                          { label: 'Nama Anggota', value: m ? `${m.nama} (${m.noAnggota})` : '-' },
+                                          { label: 'Tanggal', value: pw.tanggal },
+                                          { label: 'Jenis', value: pw.jenis === 'hutang_baru' ? 'Belanja Kasbon / Kredit' : 'Pelunasan / Bayar' },
+                                          { label: 'Nominal', value: formatRupiah(pw.nominal), isHighlight: true },
+                                          { label: 'Keterangan', value: pw.keterangan || '-' }
+                                        ],
+                                        warningMessage: 'Menghapus mutasi ini akan mengkalkulasi ulang saldo piutang anggota dan posisi kas koperasi.',
+                                        onConfirm: async () => {
+                                          await onDeletePiutang(pw.id);
+                                        }
+                                      });
                                     }}
                                     className="p-1 hover:text-rose-600 rounded hover:bg-rose-50 dark:hover:bg-rose-950/20 text-slate-400 transition cursor-pointer"
                                     title="Hapus"
@@ -965,39 +1476,24 @@ export function AdminWarungView({
                     <div>
                       <label className="block text-slate-500 mb-1">Harga Satuan:</label>
                       <input 
-                        type="number" 
-                        min="0"
-                        placeholder="Rp"
+                        type="text" 
+                        placeholder="Contoh: 15.000"
                         className="w-full p-2 border border-slate-200 dark:border-slate-850 rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 focus:outline-emerald-600 font-mono"
                         value={pemPrice}
-                        onChange={(e) => setPemPrice(e.target.value)}
+                        onChange={(e) => {
+                          const raw = e.target.value.replace(/\D/g, '');
+                          setPemPrice(raw ? parseInt(raw, 10).toLocaleString('id-ID') : '');
+                        }}
                         required
                       />
                     </div>
                   </div>
-                  {(() => {
-                    const estimatedTotal = (parseInt(pemQty) || 0) * (parseFloat(pemPrice) || 0);
-                    const isInsufficient = availableCash !== undefined && estimatedTotal > availableCash;
-                    return (
-                      <div className={`p-2 rounded-lg border flex flex-col gap-1 transition-all ${
-                        isInsufficient 
-                          ? 'bg-rose-50 dark:bg-rose-950/20 border-rose-300 dark:border-rose-800' 
-                          : 'bg-slate-50 dark:bg-slate-900 border-slate-150 dark:border-slate-800'
-                      }`}>
-                        <div className="flex justify-between items-center font-bold text-xs">
-                          <span className={isInsufficient ? "text-rose-600 dark:text-rose-400 font-bold" : "text-slate-500"}>ESTIMASI TOTAL:</span>
-                          <span className={`text-sm font-mono font-bold ${isInsufficient ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}`}>
-                            {formatRupiah(estimatedTotal)}
-                          </span>
-                        </div>
-                        {isInsufficient && (
-                          <div className="text-[9px] text-rose-600 dark:text-rose-400 font-extrabold flex items-center gap-0.5 mt-0.5">
-                            ⚠️ Saldo Kas Tidak Mencukupi (Tersedia: {formatRupiah(availableCash)})
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
+                  <div className="p-2 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-150 dark:border-slate-800 flex justify-between items-center font-bold">
+                    <span className="text-[10px] text-slate-400">ESTIMASI TOTAL:</span>
+                    <span className="text-sm text-emerald-600 font-mono font-bold">
+                      {formatRupiah((parseInt(pemQty) || 0) * (parseFloat(pemPrice.replace(/\D/g, '')) || 0))}
+                    </span>
+                  </div>
                   <div>
                     <label className="block text-slate-500 mb-1">Keterangan / Memo:</label>
                     <textarea 
@@ -1063,33 +1559,30 @@ export function AdminWarungView({
                               {formatRupiah(p.totalHarga)}
                             </td>
                             <td className="py-3 px-3 text-center">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <button 
-                                  onClick={() => {
-                                    setEditingPembelian(p);
-                                    setEditPemDate(p.tanggal);
-                                    setEditPemName(p.namaBarang);
-                                    setEditPemQty(p.kuantitas.toString());
-                                    setEditPemPrice(p.hargaSatuan.toString());
-                                    setEditPemNotes(p.keterangan || '');
-                                  }}
-                                  className="p-1 hover:text-emerald-600 rounded hover:bg-emerald-50 dark:hover:bg-emerald-950/20 text-slate-400 transition cursor-pointer"
-                                  title="Edit Catatan Pembelian"
-                                >
-                                  <Edit3 className="w-3.5 h-3.5" />
-                                </button>
-                                <button 
-                                  onClick={async () => {
-                                    if (confirm(`Apakah Anda yakin ingin menghapus catatan pembelian "${p.namaBarang}"?`)) {
+                              <button 
+                                onClick={() => {
+                                  setDeleteModalState({
+                                    isOpen: true,
+                                    itemType: 'Catatan Pembelian / Kulakan',
+                                    itemName: `${p.namaBarang} (${p.kuantitas} item)`,
+                                    itemDetails: [
+                                      { label: 'Tanggal', value: p.tanggal },
+                                      { label: 'Nama Barang', value: p.namaBarang },
+                                      { label: 'Kuantitas', value: `${p.kuantitas} item` },
+                                      { label: 'Kategori', value: p.kategori || '-' },
+                                      { label: 'Total Pembelian', value: formatRupiah(p.totalHarga), isHighlight: true }
+                                    ],
+                                    warningMessage: 'Menghapus catatan pembelian ini akan memperbarui riwayat pengeluaran kas dan nilai persediaan warung.',
+                                    onConfirm: async () => {
                                       await onDeletePembelian(p.id);
                                     }
-                                  }}
-                                  className="p-1 hover:text-rose-600 rounded hover:bg-rose-50 dark:hover:bg-rose-950/20 text-slate-400 transition cursor-pointer"
-                                  title="Hapus Catatan Pembelian"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
+                                  });
+                                }}
+                                className="p-1 hover:text-rose-600 rounded hover:bg-rose-50 dark:hover:bg-rose-950/20 text-slate-400 transition cursor-pointer"
+                                title="Hapus Pembelian"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                             </td>
                           </tr>
                         ))
@@ -1152,32 +1645,47 @@ export function AdminWarungView({
                   </div>
 
                   {penType === 'kredit' && (
-                    <div>
+                    <div className="space-y-1">
                       <label className="block text-slate-500 mb-1">Anggota Debitur:</label>
-                      <select 
-                        className="w-full p-2 border border-slate-200 dark:border-slate-850 rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 focus:outline-emerald-600 font-medium"
-                        value={penAnggotaId}
-                        onChange={(e) => setPenAnggotaId(e.target.value)}
-                        required={penType === 'kredit'}
-                      >
-                        {members.map(m => (
-                          <option key={m.id} value={m.id}>
-                            {m.nama} ({m.noAnggota})
-                          </option>
-                        ))}
-                      </select>
+                      <div className="space-y-1.5">
+                        <div className="relative">
+                          <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="Ketik untuk filter ID / Nama Anggota..."
+                            className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
+                            value={penMemberSearch}
+                            onChange={(e) => setPenMemberSearch(e.target.value)}
+                          />
+                        </div>
+                        <select 
+                          className="w-full p-2 border border-slate-200 dark:border-slate-850 rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 focus:outline-emerald-600 font-medium text-xs"
+                          value={penAnggotaId}
+                          onChange={(e) => setPenAnggotaId(e.target.value)}
+                          required={penType === 'kredit'}
+                        >
+                          <option value="">-- Pilih Anggota ({penFilteredMembers.length}) --</option>
+                          {penFilteredMembers.map(m => (
+                            <option key={m.id} value={m.id}>
+                              {m.nama} ({m.noAnggota})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                     </div>
                   )}
 
                   <div>
                     <label className="block text-slate-500 mb-1">Nominal Penjualan:</label>
                     <input 
-                      type="number" 
-                      min="0"
-                      placeholder="Rp"
+                      type="text" 
+                      placeholder="Contoh: 150.000"
                       className="w-full p-2 border border-slate-200 dark:border-slate-850 rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 focus:outline-emerald-600 font-mono"
                       value={penNominal}
-                      onChange={(e) => setPenNominal(e.target.value)}
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/\D/g, '');
+                        setPenNominal(raw ? parseInt(raw, 10).toLocaleString('id-ID') : '');
+                      }}
                       required
                     />
                   </div>
@@ -1264,17 +1772,30 @@ export function AdminWarungView({
                             </td>
                             <td className="py-3 px-3 text-center">
                               <button 
-                                onClick={async () => {
-                                  if (confirm("Hapus catatan penjualan ini?")) {
-                                    if (sale.source === 'income') {
-                                      await onDeleteIncome(sale.rawId);
-                                    } else {
-                                      await onDeletePiutang(sale.rawId);
+                                onClick={() => {
+                                  setDeleteModalState({
+                                    isOpen: true,
+                                    itemType: 'Catatan Penjualan Warung',
+                                    itemName: `${sale.nama} - ${formatRupiah(sale.nominal)}`,
+                                    itemDetails: [
+                                      { label: 'Tanggal Transaksi', value: sale.tanggal },
+                                      { label: 'Pelanggan / Anggota', value: `${sale.nama} ${sale.noAnggota !== '-' ? `(${sale.noAnggota})` : ''}` },
+                                      { label: 'Keterangan Transaksi', value: sale.keterangan || '-' },
+                                      { label: 'Metode Pembayaran', value: sale.tipe === 'Tunai' ? 'Tunai (Kas Masuk)' : 'Kredit (Piutang Kasbon)' },
+                                      { label: 'Total Belanja', value: formatRupiah(sale.nominal), isHighlight: true }
+                                    ],
+                                    warningMessage: 'Menghapus catatan transaksi penjualan ini akan mengoreksi kembali saldo kas atau piutang anggota.',
+                                    onConfirm: async () => {
+                                      if (sale.source === 'income') {
+                                        await onDeleteIncome(sale.rawId);
+                                      } else {
+                                        await onDeletePiutang(sale.rawId);
+                                      }
                                     }
-                                    alert("Catatan penjualan terhapus!");
-                                  }
+                                  });
                                 }}
                                 className="p-1 hover:text-rose-600 rounded hover:bg-rose-50 dark:hover:bg-rose-950/20 text-slate-400 transition cursor-pointer"
+                                title="Hapus Penjualan"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -1290,175 +1811,65 @@ export function AdminWarungView({
           </>
         )}
       </div>
-
-      {/* Edit Pembelian Modal */}
-      {editingPembelian && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 font-sans text-xs">
-          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-150 dark:border-slate-800 shadow-2xl max-w-md w-full overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50">
-              <div className="flex items-center gap-2">
-                <span className="p-2 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 rounded-xl">
-                  <Edit3 className="w-4 h-4" />
-                </span>
-                <div>
-                  <h3 className="font-bold text-slate-850 dark:text-slate-100 text-sm">Edit Pembelian Persediaan</h3>
-                  <p className="text-[10px] text-slate-455 dark:text-slate-400 mt-0.5">Ubah rincian pembelian barang warung</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setEditingPembelian(null)}
-                className="p-1.5 hover:bg-slate-150 dark:hover:bg-slate-850 text-slate-400 rounded-lg transition"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form 
-              onSubmit={async (e) => {
-                e.preventDefault();
-                const qty = parseInt(editPemQty);
-                const prc = parseFloat(editPemPrice);
-                if (isNaN(qty) || qty <= 0 || isNaN(prc) || prc <= 0 || !editPemName.trim()) {
-                  alert("Harap lengkapi formulir dengan nilai yang valid!");
-                  return;
-                }
-                const total = qty * prc;
-                const diff = total - editingPembelian.totalHarga;
-                if (availableCash !== undefined && diff > availableCash) {
-                  alert(`Saldo kas tidak mencukupi!\n\nKebutuhan Tambahan: ${formatRupiah(diff)}\nSaldo Kas Saat Ini: ${formatRupiah(availableCash)}`);
-                  return;
-                }
-                if (onUpdatePembelian) {
-                  await onUpdatePembelian(editingPembelian.id, {
-                    tanggal: editPemDate,
-                    namaBarang: editPemName.trim(),
-                    kategori: editingPembelian.kategori,
-                    kuantitas: qty,
-                    hargaSatuan: prc,
-                    totalHarga: total,
-                    keterangan: editPemNotes.trim() || `Pembelian ${editPemName.trim()}`
-                  });
-                }
-                setEditingPembelian(null);
-              }}
-              className="p-5 space-y-4 overflow-y-auto"
-            >
-              <div>
-                <label className="block text-slate-500 mb-1 font-semibold">Tanggal Transaksi:</label>
-                <input 
-                  type="date" 
-                  required
-                  value={editPemDate}
-                  onChange={(e)=>setEditPemDate(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-500 mb-1 font-semibold">Nama Barang:</label>
-                <input 
-                  type="text" 
-                  required
-                  value={editPemName}
-                  onChange={(e)=>setEditPemName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-500 mb-1 font-semibold">Kuantitas (Qty):</label>
-                  <input 
-                    type="number" 
-                    required
-                    min="1"
-                    value={editPemQty}
-                    onChange={(e)=>setEditPemQty(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-500 mb-1 font-semibold">Harga Satuan (Rp):</label>
-                  <input 
-                    type="number" 
-                    required
-                    min="0"
-                    value={editPemPrice}
-                    onChange={(e)=>setEditPemPrice(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-mono"
-                  />
-                </div>
-              </div>
-
-              {(() => {
-                const estimatedTotal = (parseInt(editPemQty) || 0) * (parseFloat(editPemPrice) || 0);
-                const originalTotal = editingPembelian.totalHarga;
-                const diff = estimatedTotal - originalTotal;
-                const isInsufficient = availableCash !== undefined && diff > availableCash;
-                return (
-                  <div className={`p-3 rounded-xl border flex flex-col gap-1 transition-all ${
-                    isInsufficient 
-                      ? 'bg-rose-50 dark:bg-rose-950/20 border-rose-300 dark:border-rose-800' 
-                      : 'bg-slate-50 dark:bg-slate-950/40 border-slate-150 dark:border-slate-800'
-                  }`}>
-                    <div className="flex justify-between items-center font-bold">
-                      <span className={isInsufficient ? "text-rose-600 dark:text-rose-400 font-bold" : "text-slate-500"}>TOTAL BARU:</span>
-                      <span className={`text-sm font-mono font-bold ${isInsufficient ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}`}>
-                        {formatRupiah(estimatedTotal)}
-                      </span>
-                    </div>
-                    {diff !== 0 && (
-                      <div className="flex justify-between items-center text-[10px] text-slate-400 font-medium">
-                        <span>Selisih:</span>
-                        <span className={diff > 0 ? "text-amber-600 font-semibold" : "text-emerald-600 font-semibold"}>
-                          {diff > 0 ? `+${formatRupiah(diff)}` : formatRupiah(diff)}
-                        </span>
-                      </div>
-                    )}
-                    {isInsufficient && (
-                      <div className="text-[10px] text-rose-600 dark:text-rose-400 font-bold flex items-center gap-1 mt-1">
-                        ⚠️ Saldo Kas Tidak Mencukupi (Tersedia: {formatRupiah(availableCash)})
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              <div>
-                <label className="block text-slate-500 mb-1 font-semibold">Keterangan / Supplier:</label>
-                <textarea 
-                  rows={2}
-                  value={editPemNotes}
-                  onChange={(e)=>setEditPemNotes(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
-                />
-              </div>
-
-              <div className="flex gap-2 pt-2">
-                <button 
-                  type="button"
-                  onClick={() => setEditingPembelian(null)}
-                  className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 text-center font-bold transition cursor-pointer"
-                >
-                  Batal
-                </button>
-                <button 
-                  type="submit"
-                  disabled={(() => {
-                    const estimatedTotal = (parseInt(editPemQty) || 0) * (parseFloat(editPemPrice) || 0);
-                    const originalTotal = editingPembelian.totalHarga;
-                    const diff = estimatedTotal - originalTotal;
-                    return availableCash !== undefined && diff > availableCash;
-                  })()}
-                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl font-bold shadow-sm hover:shadow transition cursor-pointer"
-                >
-                  Simpan Perubahan
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
       )}
+
+      <ConfirmDeleteModal
+        isOpen={!!deleteModalState?.isOpen}
+        title={deleteModalState ? `Hapus ${deleteModalState.itemType}` : undefined}
+        itemType={deleteModalState?.itemType}
+        itemName={deleteModalState?.itemName}
+        itemDetails={deleteModalState?.itemDetails}
+        warningMessage={deleteModalState?.warningMessage}
+        onConfirm={async () => {
+          if (deleteModalState?.onConfirm) {
+            await deleteModalState.onConfirm();
+          }
+          setDeleteModalState(null);
+        }}
+        onClose={() => setDeleteModalState(null)}
+      />
+
+      {/* MODAL: Scanner Barcode via Kamera Perangkat (Untuk Pencarian/Filter Katalog) */}
+      <CameraBarcodeScannerModal
+        isOpen={showCameraScanner}
+        onClose={() => setShowCameraScanner(false)}
+        onScan={(code, matched) => {
+          if (matched) {
+            setSearchQuery(matched.namaBarang);
+            setShowCameraScanner(false);
+          } else {
+            setSearchQuery(code);
+            setShowCameraScanner(false);
+          }
+        }}
+        warungBarang={warungBarang}
+        onQuickAddProduct={(code) => {
+          setShowCameraScanner(false);
+          resetBarangForm();
+          setBarangKode(code);
+          setShowBarangForm(true);
+        }}
+      />
+
+      {/* MODAL: Scanner Barcode via Kamera Perangkat (Untuk Form Tambah/Edit Barang) */}
+      <CameraBarcodeScannerModal
+        isOpen={showCameraScannerInForm}
+        onClose={() => setShowCameraScannerInForm(false)}
+        onScan={(code) => {
+          setBarangKode(code);
+          setShowCameraScannerInForm(false);
+        }}
+        warungBarang={warungBarang}
+      />
+
+      {/* MODAL: Cetak Label Rak Minimarket & Barcode Stiker */}
+      <CetakLabelRakModal
+        isOpen={showLabelRakModal}
+        onClose={() => setShowLabelRakModal(false)}
+        warungBarang={warungBarang}
+        onUpdateBarang={onEditBarang}
+        setup={setup}
+      />
     </div>
   );
 }

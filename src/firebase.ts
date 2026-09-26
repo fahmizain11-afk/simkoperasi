@@ -5,7 +5,9 @@ import firebaseConfig from '../firebase-applet-config.json';
 
 // Fetch client overridden dynamic config if exists (such as custom "danasegar" project)
 function getFirebaseInitConfig() {
-  const dynamicData = localStorage.getItem('kop_firebase_config');
+  const dynamicData = typeof window !== 'undefined' && typeof localStorage !== 'undefined' 
+    ? localStorage.getItem('kop_firebase_config') 
+    : null;
   if (dynamicData) {
     try {
       const parsed = JSON.parse(dynamicData);
@@ -41,14 +43,12 @@ signInAnonymously(auth)
     console.log("Firebase Auth: Anonymous login not active or offline. Operating with default Firestore access configurations.", err);
   });
 
-// Validate Connection to Firestore on initial boot
+// Validate Connection to Firestore on initial boot (non-blocking)
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration. Client is offline.");
-    }
+  } catch (_error) {
+    // Benign check - fallback to offline caching if connection cannot be established
   }
 }
-testConnection();
+setTimeout(testConnection, 2000);

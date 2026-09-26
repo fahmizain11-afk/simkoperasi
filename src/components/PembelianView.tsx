@@ -2,27 +2,33 @@ import React, { useState } from 'react';
 import { Pembelian, KoperasiSetup } from '../types';
 import { formatRupiah } from '../utils/finance';
 import { 
-  ShoppingCart, Plus, Trash2, Calendar, Tag, FileText, Search, Lock, Edit3, X
+  ShoppingCart, Plus, Trash2, Calendar, Tag, FileText, Search
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface PembelianProps {
   setup?: KoperasiSetup;
   pembelian: Pembelian[];
   onAddPembelian: (item: Omit<Pembelian, 'id'>) => void;
-  onUpdatePembelian?: (id: string, item: Omit<Pembelian, 'id'>) => void;
   onDeletePembelian: (id: string) => void;
-  availableCash?: number;
 }
 
 export function PembelianView({
   setup,
   pembelian,
   onAddPembelian,
-  onUpdatePembelian,
-  onDeletePembelian,
-  availableCash
+  onDeletePembelian
 }: PembelianProps) {
+  const [deleteModalState, setDeleteModalState] = useState<{
+    isOpen: boolean;
+    itemType: string;
+    itemName: string;
+    itemDetails?: { label: string; value: string; isHighlight?: boolean }[];
+    warningMessage?: string;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
+
   // Form states for Pembelian
   const [pemDate, setPemDate] = useState(new Date().toISOString().substring(0, 10));
   const [pemName, setPemName] = useState('');
@@ -30,15 +36,6 @@ export function PembelianView({
   const [pemQty, setPemQty] = useState('1');
   const [pemPrice, setPemPrice] = useState('');
   const [pemNotes, setPemNotes] = useState('');
-
-  // Form states for Editing Pembelian
-  const [editingPembelian, setEditingPembelian] = useState<Pembelian | null>(null);
-  const [editDate, setEditDate] = useState('');
-  const [editName, setEditName] = useState('');
-  const [editCat, setEditCat] = useState('persediaan_warung');
-  const [editQty, setEditQty] = useState('1');
-  const [editPrice, setEditPrice] = useState('');
-  const [editNotes, setEditNotes] = useState('');
 
   // Custom Categories list from localStorage
   const [customCategories, setCustomCategories] = useState<string[]>(() => {
@@ -58,15 +55,9 @@ export function PembelianView({
   const handlePembelianSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const qty = parseInt(pemQty);
-    const prc = parseFloat(pemPrice);
+    const prc = parseFloat(pemPrice.replace(/\D/g, ''));
     if (isNaN(qty) || qty <= 0 || isNaN(prc) || prc <= 0 || !pemName.trim()) {
       alert("Harap lengkapi formulir pembelian dengan nilai yang valid!");
-      return;
-    }
-
-    const total = qty * prc;
-    if (availableCash !== undefined && total > availableCash) {
-      alert(`Transaksi Gagal!\n\nSaldo kas tidak mencukupi untuk melakukan pembelian ini.\n\nSaldo Kas Saat Ini: ${formatRupiah(availableCash)}\nTotal Pembelian: ${formatRupiah(total)}\n\nSilakan kurangi kuantitas atau harga satuan.`);
       return;
     }
 
@@ -76,7 +67,7 @@ export function PembelianView({
       kategori: pemCat,
       kuantitas: qty,
       hargaSatuan: prc,
-      totalHarga: total,
+      totalHarga: qty * prc,
       keterangan: pemNotes.trim() || `Pembelian ${pemName.trim()}`
     });
 
@@ -85,6 +76,7 @@ export function PembelianView({
     setPemQty('1');
     setPemPrice('');
     setPemNotes('');
+    alert("Transaksi Pembelian/Inventaris berhasil disimpan ke database!");
   };
 
   // Filtered Lists
@@ -188,6 +180,7 @@ export function PembelianView({
                   <option value="persediaan_barang">📦 Persediaan Barang Dagang Lain</option>
                   <option value="seragam">👕 Seragam Anggota / Pengurus</option>
                   <option value="inventaris">🖥️ Inventaris Kantor / Hardware</option>
+                  <option value="atribut">🎗️ Atribut Koperasi (Pin, Banner, Badge)</option>
                   <option value="lain_lain">📝 Pengeluaran Pembelian Lain</option>
                   {customCategories.map((cat) => (
                     <option key={cat} value={cat}>🏢 {cat}</option>
@@ -264,39 +257,23 @@ export function PembelianView({
                 <div className="space-y-1">
                   <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Harga Satuan (Rp)</label>
                   <input 
-                    type="number" 
-                    placeholder="Contoh: 15000"
+                    type="text" 
+                    placeholder="Contoh: 15.000"
                     className="w-full px-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-800 focus:outline-emerald-600 font-sans"
                     value={pemPrice}
-                    onChange={(e) => setPemPrice(e.target.value)}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\D/g, '');
+                      setPemPrice(raw ? parseInt(raw, 10).toLocaleString('id-ID') : '');
+                    }}
                     required
                   />
                 </div>
               </div>
 
-              {(() => {
-                const estimatedTotal = (parseInt(pemQty) || 0) * (parseFloat(pemPrice) || 0);
-                const isInsufficient = availableCash !== undefined && estimatedTotal > availableCash;
-                return (
-                  <div className={`p-2.5 rounded-lg border border-dashed flex flex-col gap-1.5 transition duration-200 ${
-                    isInsufficient 
-                      ? 'bg-rose-50 dark:bg-rose-950/20 border-rose-300 dark:border-rose-800' 
-                      : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800'
-                  }`}>
-                    <div className="flex justify-between items-center text-xs font-mono">
-                      <span className={isInsufficient ? "text-rose-600 dark:text-rose-400 font-bold" : "text-slate-500"}>Estimasi Total:</span>
-                      <span className={`font-bold ${isInsufficient ? 'text-rose-600 dark:text-rose-400 text-sm' : 'text-emerald-700 dark:text-emerald-400'}`}>
-                        {formatRupiah(estimatedTotal)}
-                      </span>
-                    </div>
-                    {isInsufficient && (
-                      <div className="text-[10px] text-rose-600 dark:text-rose-400 font-extrabold flex items-center gap-1 mt-0.5">
-                        ⚠️ Saldo Kas Tidak Mencukupi (Tersedia: {formatRupiah(availableCash)})
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
+              <div className="bg-slate-50 dark:bg-slate-900 p-2.5 rounded-lg border border-dashed border-slate-200 dark:border-slate-800 flex justify-between items-center text-xs font-mono">
+                <span className="text-slate-500">Estimasi Total:</span>
+                <span className="font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah((parseInt(pemQty) || 0) * (parseFloat(pemPrice.replace(/\D/g, '')) || 0))}</span>
+              </div>
 
               <div className="space-y-1">
                 <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Keterangan / Supplier</label>
@@ -369,34 +346,31 @@ export function PembelianView({
                           <td className="py-3 px-3 text-right font-mono text-slate-500">{formatRupiah(p.hargaSatuan)}</td>
                           <td className="py-3 px-3 text-right font-bold text-slate-900 dark:text-slate-50 font-mono text-[12px]">{formatRupiah(p.totalHarga)}</td>
                           <td className="py-3 px-3 text-center">
-                            <div className="flex items-center justify-center gap-1.5">
-                              <button 
-                                onClick={() => {
-                                  setEditingPembelian(p);
-                                  setEditDate(p.tanggal);
-                                  setEditName(p.namaBarang);
-                                  setEditCat(p.kategori);
-                                  setEditQty(p.kuantitas.toString());
-                                  setEditPrice(p.hargaSatuan.toString());
-                                  setEditNotes(p.keterangan || '');
-                                }}
-                                className="p-1 hover:text-emerald-600 rounded hover:bg-emerald-50 dark:hover:bg-emerald-950/20 text-slate-400 transition cursor-pointer"
-                                title="Edit Catatan"
-                              >
-                                <Edit3 className="w-3.5 h-3.5" />
-                              </button>
-                              <button 
-                                onClick={() => {
-                                  if(confirm("Apakah Anda yakin ingin menghapus catatan pembelian ini?")) {
+                            <button 
+                              onClick={() => {
+                                setDeleteModalState({
+                                  isOpen: true,
+                                  itemType: 'Catatan Pembelian / Pengeluaran',
+                                  itemName: `${p.namaBarang} (${p.kuantitas} pcs)`,
+                                  itemDetails: [
+                                    { label: 'Tanggal', value: p.tanggal },
+                                    { label: 'Nama Barang', value: p.namaBarang },
+                                    { label: 'Kategori', value: p.kategori.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') },
+                                    { label: 'Kuantitas', value: String(p.kuantitas) },
+                                    { label: 'Harga Satuan', value: formatRupiah(p.hargaSatuan) },
+                                    { label: 'Total Biaya', value: formatRupiah(p.totalHarga), isHighlight: true }
+                                  ],
+                                  warningMessage: 'Menghapus catatan ini akan mengembalikan saldo buku kas dan memperbarui laporan neraca koperasi.',
+                                  onConfirm: () => {
                                     onDeletePembelian(p.id);
                                   }
-                                }}
-                                className="p-1 hover:text-rose-600 rounded hover:bg-rose-50 dark:hover:bg-rose-950/20 text-slate-400 transition cursor-pointer"
-                                title="Hapus Catatan"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
+                                });
+                              }}
+                              className="p-1 hover:text-rose-600 rounded hover:bg-rose-50 dark:hover:bg-rose-950/20 text-slate-400 transition cursor-pointer"
+                              title="Hapus Catatan"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </td>
                         </tr>
                       ))
@@ -409,195 +383,21 @@ export function PembelianView({
         </div>
       </div>
 
-      {/* Edit Pembelian Modal */}
-      {editingPembelian && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 font-sans">
-          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-150 dark:border-slate-800 shadow-2xl max-w-md w-full overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50">
-              <div className="flex items-center gap-2">
-                <span className="p-2 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 rounded-xl">
-                  <Edit3 className="w-4 h-4" />
-                </span>
-                <div>
-                  <h3 className="font-bold text-slate-850 dark:text-slate-100 text-sm">Edit Catatan Pembelian</h3>
-                  <p className="text-[10px] text-slate-455 dark:text-slate-400 mt-0.5">Ubah data pembelian atau pengadaan</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setEditingPembelian(null)}
-                className="p-1.5 hover:bg-slate-150 dark:hover:bg-slate-850 text-slate-400 rounded-lg transition"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form 
-              onSubmit={(e) => {
-                e.preventDefault();
-                const qty = parseInt(editQty);
-                const prc = parseFloat(editPrice);
-                if (isNaN(qty) || qty <= 0 || isNaN(prc) || prc <= 0 || !editName.trim()) {
-                  alert("Harap lengkapi formulir dengan nilai yang valid!");
-                  return;
-                }
-                const total = qty * prc;
-                const diff = total - editingPembelian.totalHarga;
-                if (availableCash !== undefined && diff > availableCash) {
-                  alert(`Saldo kas tidak mencukupi!\n\nKebutuhan Tambahan: ${formatRupiah(diff)}\nSaldo Kas Saat Ini: ${formatRupiah(availableCash)}`);
-                  return;
-                }
-                if (onUpdatePembelian) {
-                  onUpdatePembelian(editingPembelian.id, {
-                    tanggal: editDate,
-                    namaBarang: editName.trim(),
-                    kategori: editCat,
-                    kuantitas: qty,
-                    hargaSatuan: prc,
-                    totalHarga: total,
-                    keterangan: editNotes.trim() || `Pembelian ${editName.trim()}`
-                  });
-                }
-                setEditingPembelian(null);
-              }}
-              className="p-5 space-y-4 overflow-y-auto text-xs"
-            >
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-500 mb-1 font-semibold">Tanggal Transaksi:</label>
-                  <input 
-                    type="date" 
-                    required
-                    value={editDate}
-                    onChange={(e)=>setEditDate(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-500 mb-1 font-semibold">Kategori POS:</label>
-                  <select 
-                    value={editCat}
-                    onChange={(e)=>setEditCat(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
-                  >
-                    <option value="persediaan_warung">Warung (Restock Persediaan)</option>
-                    <option value="inventaris_alat">Inventaris Kantor / Alat</option>
-                    <option value="aset_tetap">Aset Tetap / Renovasi</option>
-                    <option value="beban_operasional">Beban Operasional</option>
-                    {customCategories.map(cat => (
-                      <option key={cat} value={cat}>{cat.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-slate-500 mb-1 font-semibold">Nama Barang / Pembelian:</label>
-                <input 
-                  type="text" 
-                  required
-                  placeholder="Contoh: Beras Ramos 50kg, Printer Epson..."
-                  value={editName}
-                  onChange={(e)=>setEditName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-500 mb-1 font-semibold">Kuantitas (Qty):</label>
-                  <input 
-                    type="number" 
-                    required
-                    min="1"
-                    value={editQty}
-                    onChange={(e)=>setEditQty(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-500 mb-1 font-semibold">Harga Satuan (Rp):</label>
-                  <input 
-                    type="number" 
-                    required
-                    min="0"
-                    placeholder="Contoh: 15000"
-                    value={editPrice}
-                    onChange={(e)=>setEditPrice(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-mono"
-                  />
-                </div>
-              </div>
-
-              {(() => {
-                const estimatedTotal = (parseInt(editQty) || 0) * (parseFloat(editPrice) || 0);
-                const originalTotal = editingPembelian.totalHarga;
-                const diff = estimatedTotal - originalTotal;
-                const isInsufficient = availableCash !== undefined && diff > availableCash;
-                return (
-                  <div className={`p-3 rounded-xl border flex flex-col gap-1 transition-all ${
-                    isInsufficient 
-                      ? 'bg-rose-50 dark:bg-rose-950/20 border-rose-300 dark:border-rose-800' 
-                      : 'bg-slate-50 dark:bg-slate-950/40 border-slate-150 dark:border-slate-800'
-                  }`}>
-                    <div className="flex justify-between items-center font-bold text-xs">
-                      <span className={isInsufficient ? "text-rose-600 dark:text-rose-400 font-bold" : "text-slate-500"}>TOTAL BARU:</span>
-                      <span className={`text-sm font-mono font-bold ${isInsufficient ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}`}>
-                        {formatRupiah(estimatedTotal)}
-                      </span>
-                    </div>
-                    {diff !== 0 && (
-                      <div className="flex justify-between items-center text-[10px] text-slate-400 font-medium">
-                        <span>Selisih dengan sebelumnya:</span>
-                        <span className={diff > 0 ? "text-amber-600 font-semibold" : "text-emerald-600 font-semibold"}>
-                          {diff > 0 ? `+${formatRupiah(diff)}` : formatRupiah(diff)}
-                        </span>
-                      </div>
-                    )}
-                    {isInsufficient && (
-                      <div className="text-[10px] text-rose-600 dark:text-rose-400 font-bold flex items-center gap-1 mt-1">
-                        ⚠️ Saldo Kas Tidak Mencukupi (Tersedia: {formatRupiah(availableCash)})
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              <div>
-                <label className="block text-slate-500 mb-1 font-semibold">Keterangan / Supplier:</label>
-                <textarea 
-                  rows={2}
-                  placeholder="Keterangan toko, merek, spesifikasi barang..."
-                  value={editNotes}
-                  onChange={(e)=>setEditNotes(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
-                />
-              </div>
-
-              <div className="flex gap-2 pt-2">
-                <button 
-                  type="button"
-                  onClick={() => setEditingPembelian(null)}
-                  className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-850 font-bold text-slate-600 dark:text-slate-400 text-center transition cursor-pointer"
-                >
-                  Batal
-                </button>
-                <button 
-                  type="submit"
-                  disabled={(() => {
-                    const estimatedTotal = (parseInt(editQty) || 0) * (parseFloat(editPrice) || 0);
-                    const originalTotal = editingPembelian.totalHarga;
-                    const diff = estimatedTotal - originalTotal;
-                    return availableCash !== undefined && diff > availableCash;
-                  })()}
-                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl font-bold shadow-sm hover:shadow transition cursor-pointer"
-                >
-                  Simpan Perubahan
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <ConfirmDeleteModal
+        isOpen={!!deleteModalState?.isOpen}
+        title={deleteModalState ? `Hapus ${deleteModalState.itemType}` : undefined}
+        itemType={deleteModalState?.itemType}
+        itemName={deleteModalState?.itemName}
+        itemDetails={deleteModalState?.itemDetails}
+        warningMessage={deleteModalState?.warningMessage}
+        onConfirm={async () => {
+          if (deleteModalState?.onConfirm) {
+            await deleteModalState.onConfirm();
+          }
+          setDeleteModalState(null);
+        }}
+        onClose={() => setDeleteModalState(null)}
+      />
     </div>
   );
 }

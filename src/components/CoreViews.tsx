@@ -1,13 +1,23 @@
-import React, { useState, useMemo } from 'react';
-import { Member, Simpanan, Pinjaman, Angsuran, ManasukaBungaLog, KoperasiSetup, PengajuanPinjaman, PengurusPengawas } from '../types';
-import { formatRupiah, terbilang, getTransactionTime } from '../utils/finance';
+import React, { useState, useMemo, useEffect } from 'react';
+import * as XLSX from 'xlsx';
+import { Member, Simpanan, Pinjaman, Angsuran, ManasukaBungaLog, KoperasiSetup, PengajuanPinjaman, PengurusPengawas, PiutangWarung } from '../types';
+import { formatRupiah, terbilang, getTransactionTime, sortMembersNaturally, createWhatsAppThankYouUrl, calculateMemberLedgerResume, calculateLoanOutstanding, calculateAngsuranPrincipal, calculateAngsuranInterest, calculateHistoricalLoanOutstanding, formatYearMonthIndo, exportToExcel } from '../utils/finance';
 import { 
   Users, UserPlus, FileText, Wallet, CircleDollarSign, 
   HandCoins, Key, Calendar, Send, CheckCircle2, AlertCircle, Trash2, Edit, Search, Plus, Filter, Phone, ArrowUpRight, Receipt, Eye, X,
-  Printer, Upload, Image as ImageIcon
+  Printer, Upload, Image as ImageIcon, FileSpreadsheet, Download, FileUp, FileDown, DownloadCloud, MessageSquare,
+  Scale, Sparkles, Bot, ChevronDown, ChevronUp, TrendingUp, ShieldCheck, Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { compressImage } from '../utils/imageCompressor';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
+import { LoanAIAssistantModal, FinancialMemberSummary } from './LoanAIAssistantModal';
+
+const formatInputRupiah = (valStr: string) => {
+  const clean = (valStr || '').replace(/\D/g, '');
+  if (!clean) return '';
+  return parseInt(clean, 10).toLocaleString('id-ID');
+};
 
 // ================= MEMBERS MANAGEMENT (MANAJEMEN ANGGOTA) =================
 interface AnggotaProps {
@@ -18,6 +28,7 @@ interface AnggotaProps {
   pinjaman: Pinjaman[];
   angsuran: Angsuran[];
   onAddMember: (m: Omit<Member, 'id'>) => void;
+  onBatchAddMembers?: (mList: Omit<Member, 'id'>[]) => Promise<void> | void;
   onEditMember: (m: Member) => void;
   onDeleteMember: (id: string) => void;
   onDeleteAngsuran?: (id: string) => void;
@@ -25,10 +36,17 @@ interface AnggotaProps {
   onEditSimpanan?: (updated: Simpanan) => void;
 }
 
-export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjaman, angsuran, onAddMember, onEditMember, onDeleteMember, onDeleteAngsuran, onDeleteSimpanan, onEditSimpanan }: AnggotaProps) {
+export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjaman, angsuran, onAddMember, onBatchAddMembers, onEditMember, onDeleteMember, onDeleteAngsuran, onDeleteSimpanan, onEditSimpanan }: AnggotaProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
+
+  // Import / Export Excel States
+  const [isImportOpen, setIsImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importParsedData, setImportParsedData] = useState<Omit<Member, 'id'>[] | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   const namaKetua = useMemo(() => {
     const ketuaObj = (pengurusPengawas || []).find(p => 
@@ -53,10 +71,13 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
   const [selectedLedgerMember, setSelectedLedgerMember] = useState<Member | null>(null);
   const [memberToDelete, setMemberToDelete] = useState<Member | null>(null);
   const [previewMemberCard, setPreviewMemberCard] = useState<Member | null>(null);
-  const [verificationWA, setVerificationWA] = useState<{
-    member: Member;
-    nextCode: string;
-    messageText: string;
+  const [deleteModalState, setDeleteModalState] = useState<{
+    isOpen: boolean;
+    itemType: string;
+    itemName: string;
+    itemDetails?: { label: string; value: string; isHighlight?: boolean }[];
+    warningMessage?: string;
+    onConfirm: () => void | Promise<void>;
   } | null>(null);
 
   // Simpanan Edit States
@@ -103,17 +124,33 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
 
   const handleDeleteSimpClick = (id: string) => {
     if (!onDeleteSimpanan) return;
-    if (window.confirm("Apakah Anda yakin ingin menghapus catatan simpanan ini? Tindakan ini akan menghapus data permanen dari database.")) {
-      onDeleteSimpanan(id);
-    }
+    const targetSimp = simpanan.find(s => s.id === id);
+    const memberObj = members.find(m => m.id === targetSimp?.anggotaId);
+    setDeleteModalState({
+      isOpen: true,
+      itemType: 'Catatan Simpanan',
+      itemName: targetSimp ? `Simpanan ${targetSimp.jenis} - ${formatRupiah(targetSimp.jumlah)}` : 'Catatan Simpanan',
+      itemDetails: [
+        { label: 'Nama Anggota', value: memberObj ? `${memberObj.nama} (${memberObj.noAnggota})` : '-' },
+        { label: 'Tanggal Transaksi', value: targetSimp?.tanggal || '-' },
+        { label: 'Jenis Simpanan', value: targetSimp?.jenis || '-' },
+        { label: 'Nominal', value: targetSimp ? formatRupiah(targetSimp.jumlah) : '-', isHighlight: true },
+        { label: 'Keterangan', value: targetSimp?.keterangan || '-' },
+      ],
+      warningMessage: 'Menghapus catatan simpanan ini akan secara otomatis memperbarui saldo simpanan anggota dan kas koperasi di laporan neraca.',
+      onConfirm: () => {
+        onDeleteSimpanan(id);
+      }
+    });
   };
 
   const filteredMembers = useMemo(() => {
-    return members.filter(m => 
+    const res = members.filter(m => 
       m.nama.toLowerCase().includes(searchTerm.toLowerCase()) ||
       m.noAnggota.toLowerCase().includes(searchTerm.toLowerCase()) ||
       m.noHp.includes(searchTerm)
     );
+    return sortMembersNaturally(res);
   }, [members, searchTerm]);
 
   const handleAddSubmit = (e: React.FormEvent) => {
@@ -211,6 +248,218 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
     }
   };
 
+  // Excel Export Handler
+  const handleExportExcel = () => {
+    if (members.length === 0) {
+      alert("Belum ada data anggota untuk diexport.");
+      return;
+    }
+
+    const exportData = members.map((m, idx) => {
+      const fin = getMemberFinancialInfo(m.id);
+      return {
+        'No': idx + 1,
+        'No. Anggota': m.noAnggota,
+        'Nama Lengkap': m.nama,
+        'Jenis Kelamin': m.jenisKelamin || 'Laki-laki',
+        'Alamat': m.alamat || '-',
+        'No HP': m.noHp || '-',
+        'Pekerjaan': m.pekerjaan || '-',
+        'Tempat Lahir': m.tempatLahir || '-',
+        'Tanggal Lahir': m.tanggalLahir || '-',
+        'Tanggal Bergabung': m.tanggalBergabung || '-',
+        'Sisa Pinjaman (Rp)': fin.totalPinjamanBeredar
+      };
+    });
+
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    ws['!cols'] = [
+      { wch: 5 },
+      { wch: 15 },
+      { wch: 25 },
+      { wch: 15 },
+      { wch: 30 },
+      { wch: 18 },
+      { wch: 18 },
+      { wch: 18 },
+      { wch: 15 },
+      { wch: 18 },
+      { wch: 20 },
+      { wch: 20 }
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Data Anggota');
+    const fileName = `Data_Anggota_Koperasi_${new Date().toISOString().substring(0, 10)}.xlsx`;
+    XLSX.writeFile(wb, fileName);
+  };
+
+  // Excel Download Template Handler
+  const handleDownloadTemplate = () => {
+    const templateData = [
+      {
+        'No. Anggota': 'AG001',
+        'Nama Lengkap': 'Budi Santoso',
+        'Jenis Kelamin': 'Laki-laki',
+        'Alamat': 'Jl. Merdeka No. 12, Jakarta',
+        'No HP': '081234567890',
+        'Pekerjaan': 'Guru',
+        'Tempat Lahir': 'Jakarta',
+        'Tanggal Lahir': '1988-05-15',
+        'Tanggal Bergabung': '2023-01-10'
+      },
+      {
+        'No. Anggota': 'AG002',
+        'Nama Lengkap': 'Siti Rahma',
+        'Jenis Kelamin': 'Perempuan',
+        'Alamat': 'Jl. Mawar No. 45, Bandung',
+        'No HP': '089876543210',
+        'Pekerjaan': 'PNS',
+        'Tempat Lahir': 'Bandung',
+        'Tanggal Lahir': '1992-08-20',
+        'Tanggal Bergabung': '2023-02-01'
+      }
+    ];
+
+    const ws = XLSX.utils.json_to_sheet(templateData);
+    ws['!cols'] = [
+      { wch: 15 },
+      { wch: 25 },
+      { wch: 15 },
+      { wch: 30 },
+      { wch: 18 },
+      { wch: 18 },
+      { wch: 18 },
+      { wch: 15 },
+      { wch: 18 }
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Template Anggota');
+    XLSX.writeFile(wb, 'Template_Import_Anggota_Koperasi.xlsx');
+  };
+
+  // Excel File Change & Parse Handler
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportFile(file);
+    setImportError(null);
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const rawJson = XLSX.utils.sheet_to_json(ws, { defval: '' }) as any[];
+
+        if (!rawJson || rawJson.length === 0) {
+          setImportError("File Excel kosong atau format tidak sesuai.");
+          setImportParsedData(null);
+          return;
+        }
+
+        let maxNum = 0;
+        members.forEach(m => {
+          const num = parseInt((m.noAnggota || '').replace(/\D/g, ''), 10);
+          if (!isNaN(num) && num > maxNum) {
+            maxNum = num;
+          }
+        });
+
+        const parsedMembers: Omit<Member, 'id'>[] = [];
+
+        rawJson.forEach((row) => {
+          const getValue = (candidateKeys: string[]): string => {
+            for (const key of Object.keys(row)) {
+              const cleanKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+              for (const cand of candidateKeys) {
+                const cleanCand = cand.toLowerCase().replace(/[^a-z0-9]/g, '');
+                if (cleanKey === cleanCand || cleanKey.includes(cleanCand)) {
+                  return String(row[key]).trim();
+                }
+              }
+            }
+            return '';
+          };
+
+          const namaVal = getValue(['namalengkap', 'nama', 'membername', 'name']);
+          if (!namaVal) return;
+
+          let noAnggotaVal = getValue(['noanggota', 'idanggota', 'kodeanggota', 'nomoranggota', 'no_anggota', 'no.anggota']);
+          if (!noAnggotaVal) {
+            maxNum++;
+            noAnggotaVal = `AG${String(maxNum).padStart(3, '0')}`;
+          }
+
+          const alamatVal = getValue(['alamat', 'address']) || 'Alamat tidak diisikan';
+          const noHpVal = getValue(['nohp', 'hp', 'notelepon', 'phone', 'wa', 'whatsapp', 'telepon']) || '-';
+          const jenisKelaminVal = getValue(['jeniskelamin', 'jk', 'gender']);
+          const isPerempuan = jenisKelaminVal.toLowerCase().startsWith('p') || jenisKelaminVal.toLowerCase().includes('wanita') || jenisKelaminVal.toLowerCase().includes('perempuan');
+          const finalJk: 'Laki-laki' | 'Perempuan' = isPerempuan ? 'Perempuan' : 'Laki-laki';
+
+          const pekerjaanVal = getValue(['pekerjaan', 'job', 'profesi']) || 'Guru';
+          const tempatLahirVal = getValue(['tempatlahir', 'tempat_lahir']) || '';
+          const tanggalLahirVal = getValue(['tanggallahir', 'tanggal_lahir', 'ttl']) || '';
+          const tglBergabungVal = getValue(['tanggalbergabung', 'tanggal_bergabung', 'tgl_bergabung', 'joined']) || new Date().toISOString().substring(0, 10);
+
+          parsedMembers.push({
+            noAnggota: noAnggotaVal,
+            nama: namaVal,
+            alamat: alamatVal,
+            noHp: noHpVal,
+            jenisKelamin: finalJk,
+            pekerjaan: pekerjaanVal,
+            tempatLahir: tempatLahirVal,
+            tanggalLahir: tanggalLahirVal,
+            tanggalBergabung: tglBergabungVal,
+            fotoUrl: ''
+          });
+        });
+
+        if (parsedMembers.length === 0) {
+          setImportError("Tidak ditemukan data anggota yang valid pada file. Pastikan ada kolom 'Nama Lengkap' yang terisi.");
+          setImportParsedData(null);
+        } else {
+          setImportParsedData(parsedMembers);
+        }
+      } catch (err) {
+        console.error("Import error:", err);
+        setImportError("Gagal membaca file Excel. Pastikan file berformat .xlsx, .xls, atau .csv.");
+        setImportParsedData(null);
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  // Confirm Import Handler
+  const handleConfirmImport = async () => {
+    if (!importParsedData || importParsedData.length === 0) return;
+    setIsImporting(true);
+
+    try {
+      if (onBatchAddMembers) {
+        await onBatchAddMembers(importParsedData);
+      } else {
+        for (const m of importParsedData) {
+          await onAddMember(m);
+        }
+      }
+      alert(`Berhasil mengimpor ${importParsedData.length} data anggota! Jika ada Nomor Anggota yang sama, data telah diperbarui secara otomatis.`);
+      setIsImportOpen(false);
+      setImportFile(null);
+      setImportParsedData(null);
+    } catch (err) {
+      console.error("Batch import error:", err);
+      alert("Terjadi kesalahan saat mengimpor data anggota.");
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   const handlePrintLedger = (
     member: Member, 
     savings: Simpanan[], 
@@ -246,7 +495,9 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
 
     const loanRows = loans.map(p => {
       const pPaid = angsuran.filter(a => a.pinjamanId === p.id).reduce((acc, c) => acc + c.jumlahBayar, 0);
-      const remaining = p.status === 'Lunas' ? 0 : Math.max(0, Math.round(p.nominalPinjaman - (pPaid * (p.nominalPinjaman / p.totalWajibBayar))));
+      const remaining = calculateLoanOutstanding(p, angsuran.filter(a => a.pinjamanId === p.id));
+      const isLunas = p.status === 'Lunas' || remaining <= 0;
+      const statusText = isLunas ? 'Lunas' : 'Belum Lunas';
       return `
         <tr>
           <td style="padding: 8px; border-bottom: 1px solid #e2e8f0; font-family: monospace;">${p.tanggal}</td>
@@ -255,7 +506,7 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
           <td style="padding: 8px; border-bottom: 1px solid #e2e8f0; text-align: center;">${p.tenor} Bln</td>
           <td style="padding: 8px; border-bottom: 1px solid #e2e8f0; text-align: right; font-family: monospace; color: #0284c7;">${formatRupiah(pPaid)}</td>
           <td style="padding: 8px; border-bottom: 1px solid #e2e8f0; text-align: right; font-family: monospace; font-weight: bold; color: #e11d48;">${formatRupiah(remaining)}</td>
-          <td style="padding: 8px; border-bottom: 1px solid #e2e8f0; text-align: center;"><span style="font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; ${p.status === 'Lunas' ? 'background-color: #ecfdf5; color: #065f46;' : 'background-color: #fff1f2; color: #9f1239;'}">${p.status}</span></td>
+          <td style="padding: 8px; border-bottom: 1px solid #e2e8f0; text-align: center;"><span style="font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; ${isLunas ? 'background-color: #ecfdf5; color: #065f46;' : 'background-color: #fff1f2; color: #9f1239;'}">${statusText}</span></td>
         </tr>
       `;
     }).join('');
@@ -462,33 +713,44 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
               </div>
             </div>
 
-            <div class="summary-cards">
-              <div class="card">
-                <p>Simpanan Pokok & Wajib</p>
-                <h3>${formatRupiah(fin.totalPokok + fin.totalWajib)}</h3>
+            <div class="summary-cards" style="grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px;">
+              <div class="card" style="background-color: #f0f9ff; border-color: #bae6fd;">
+                <p>Simpanan Pokok</p>
+                <h3 style="color: #0369a1;">${formatRupiah(fin.totalPokok)}</h3>
               </div>
-              <div class="card">
-                <p>Simpanan Sukarela</p>
-                <h3 style="color: #059669;">${formatRupiah(fin.totalSukarela)}</h3>
+              <div class="card" style="background-color: #fffbeb; border-color: #fde68a;">
+                <p>Simpanan Wajib</p>
+                <h3 style="color: #b45309;">${formatRupiah(fin.totalWajib)}</h3>
               </div>
-              <div class="card">
-                <p>Pinjaman Aktif Beredar</p>
+              <div class="card" style="background-color: #f0fdf4; border-color: #bbf7d0;">
+                <p>Simpanan Manasuka</p>
+                <h3 style="color: #15803d;">${formatRupiah(fin.totalSukarela)}</h3>
+              </div>
+              <div class="card" style="background-color: #ecfdf5; border-color: #a7f3d0;">
+                <p>Total Simpanan</p>
+                <h3 style="color: #047857;">${formatRupiah(fin.grandSimpanan)}</h3>
+              </div>
+            </div>
+
+            <div class="summary-cards" style="grid-template-columns: 1fr; margin-bottom: 25px;">
+              <div class="card" style="background-color: #fff1f2; border-color: #fecdd3;">
+                <p>Pinjaman Aktif Beredar (Sisa Piutang / Hutang)</p>
                 <h3 style="color: #e11d48;">${formatRupiah(fin.totalPinjamanBeredar)}</h3>
               </div>
             </div>
 
-            <div class="section-title">Histori Mutasi Tabungan / Simpanan</div>
+            <div class="section-title">Histori Mutasi Simpanan (Pokok, Wajib, Sukarela / Manasuka)</div>
             <table>
               <thead>
                 <tr>
-                  <th style="width: 120px;">Tanggal</th>
-                  <th style="width: 150px;">Jenis Tabungan</th>
+                  <th style="width: 110px;">Tanggal</th>
+                  <th style="width: 180px;">Jenis / Mutasi</th>
                   <th>Keterangan</th>
-                  <th style="text-align: right; width: 140px;">Jumlah Setor</th>
+                  <th style="text-align: right; width: 140px;">Nominal</th>
                 </tr>
               </thead>
               <tbody>
-                ${savingsRows || '<tr><td colspan="4" class="no-data">Belum ada mutasi tabungan terdaftar</td></tr>'}
+                ${savingsRows || '<tr><td colspan="4" class="no-data">Belum ada riwayat transaksi simpanan</td></tr>'}
               </tbody>
             </table>
 
@@ -1116,9 +1378,7 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
     const activePinjaman = listP.filter(p => p.status === 'Belum Lunas');
     const totalPinjamanBeredar = activePinjaman.reduce((acc, p) => {
       const repays = angsuran.filter(a => a.pinjamanId === p.id);
-      const totalPaid = repays.reduce((sum, a) => sum + a.jumlahBayar, 0);
-      const remainingPrincipal = p.nominalPinjaman - (totalPaid * (p.nominalPinjaman / p.totalWajibBayar));
-      return acc + Math.max(0, Math.round(remainingPrincipal));
+      return acc + calculateLoanOutstanding(p, repays);
     }, 0);
 
     return {
@@ -1133,7 +1393,7 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div className="relative flex-1 max-w-md">
           <span className="absolute left-3 top-2.5 text-slate-400"><Search className="w-4 h-4"/></span>
           <input 
@@ -1144,12 +1404,42 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        <button 
-          onClick={() => setIsAddOpen(true)}
-          className="bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-sm px-4 py-2.5 rounded-xl flex items-center justify-center gap-1.5 shadow-md cursor-pointer shrink-0 transition"
-        >
-          <UserPlus className="w-4 h-4"/> Daftarkan Anggota Baru
-        </button>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button 
+            type="button"
+            onClick={handleExportExcel}
+            className="bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-semibold text-xs px-3.5 py-2.5 rounded-xl flex items-center justify-center gap-1.5 shadow-xs cursor-pointer transition"
+            title="Export seluruh data anggota ke format Excel (.xlsx)"
+          >
+            <FileDown className="w-4 h-4 text-emerald-600 dark:text-emerald-400"/>
+            <span>Export Excel</span>
+          </button>
+
+          <button 
+            type="button"
+            onClick={() => {
+              setImportFile(null);
+              setImportParsedData(null);
+              setImportError(null);
+              setIsImportOpen(true);
+            }}
+            className="bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/50 dark:hover:bg-blue-900/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 font-semibold text-xs px-3.5 py-2.5 rounded-xl flex items-center justify-center gap-1.5 shadow-xs cursor-pointer transition"
+            title="Import data anggota dari file Excel / CSV"
+          >
+            <FileUp className="w-4 h-4 text-blue-600 dark:text-blue-400"/>
+            <span>Import Excel</span>
+          </button>
+
+          <button 
+            type="button"
+            onClick={() => setIsAddOpen(true)}
+            className="bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs px-4 py-2.5 rounded-xl flex items-center justify-center gap-1.5 shadow-md cursor-pointer shrink-0 transition"
+          >
+            <UserPlus className="w-4 h-4"/>
+            <span>Daftarkan Anggota Baru</span>
+          </button>
+        </div>
       </div>
 
       {/* Grid List Members */}
@@ -1164,14 +1454,13 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
               <th className="px-6 py-3.5">Alamat</th>
               <th className="px-6 py-3.5">No Handphone</th>
               <th className="px-6 py-3.5">Status</th>
-              <th className="px-6 py-3.5">Total Simpanan</th>
               <th className="px-6 py-3.5 text-center">Aksi Registrasi</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-700 font-sans">
             {filteredMembers.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-6 py-12 text-center text-slate-400 italic">Belum ada anggota terdaftar dengan kriteria ini</td>
+                <td colSpan={7} className="px-6 py-12 text-center text-slate-400 italic">Belum ada anggota terdaftar dengan kriteria ini</td>
               </tr>
             ) : (
               filteredMembers.map((m) => {
@@ -1225,11 +1514,6 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                         </span>
                       )}
                     </td>
-                    <td className="px-6 py-4">
-                      <span className="font-semibold text-emerald-700 dark:text-emerald-400 font-mono">
-                        {formatRupiah(fin.grandSimpanan)}
-                      </span>
-                    </td>
                     <td className="px-6 py-4 text-center">
                       <div className="flex items-center justify-center gap-2">
                         {isPending ? (
@@ -1247,15 +1531,7 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                                 isVerified: true,
                                 noAnggota: nextCode
                               });
-
-                              const kopName = setup?.namaKoperasi || "Koperasi";
-                              const defaultMsg = `Halo *${m.nama}*,\n\nPendaftaran Anda di *${kopName}* telah berhasil diverifikasi dan diaktifkan!\n\nBerikut rincian akun Anda untuk login ke portal anggota:\n- *Username (No. Anggota)*: ${nextCode}\n- *Password (No. HP)*: ${m.noHp}\n\n*PENTING*: Jangan berikan username dan password ini kepada siapapun demi keamanan akun Anda.\n\nNo. Anggota resmi ini juga digunakan untuk mempermudah pencatatan transaksi simpanan, pinjaman, dan warung.\n\nTerima kasih atas partisipasi Anda!\n\n_Pengurus Koperasi_`;
-
-                              setVerificationWA({
-                                member: m,
-                                nextCode: nextCode,
-                                messageText: defaultMsg
-                              });
+                              alert(`Anggota "${m.nama}" berhasil diverifikasi dan diaktifkan dengan No. Anggota resmi: ${nextCode}!`);
                             }}
                             className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition"
                           >
@@ -1289,14 +1565,15 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                           onClick={() => {
                             setMemberToDelete(m);
                           }}
-                          className={`p-1.5 rounded-lg transition ${
+                          className={`px-2.5 py-1 text-xs font-bold rounded-lg border transition flex items-center gap-1 cursor-pointer ${
                             hasActiveLoan 
-                              ? 'text-slate-350 dark:text-slate-600 cursor-not-allowed opacity-50' 
-                              : 'text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/20 animate-hover cursor-pointer'
+                              ? 'text-slate-400 bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 cursor-not-allowed opacity-50' 
+                              : 'text-rose-600 bg-rose-50 hover:bg-rose-600 hover:text-white dark:bg-rose-950/40 dark:text-rose-400 border-rose-200 dark:border-rose-800/60'
                           }`}
-                          title={hasActiveLoan ? "Anggota memiliki pinjaman aktif" : "Keluarkan Anggota"}
+                          title={hasActiveLoan ? "Anggota tidak dapat dihapus karena masih memiliki pinjaman aktif" : "Hapus / Keluarkan Anggota"}
                         >
-                          <Trash2 className="w-4 h-4"/>
+                          <Trash2 className="w-3.5 h-3.5"/>
+                          <span>Hapus</span>
                         </button>
                       </div>
                     </td>
@@ -1375,32 +1652,12 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                     <label className="text-xs font-bold text-slate-400 uppercase label-id">Pekerjaan</label>
                     <select 
                       className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 focus:outline-emerald-700"
-                      value={['Guru', 'Kepala Sekolah', 'Staff'].includes(pekerjaan) ? pekerjaan : 'Lainnya'} 
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val === 'Lainnya') {
-                          setPekerjaan('');
-                        } else {
-                          setPekerjaan(val);
-                        }
-                      }}
+                      value={pekerjaan} onChange={(e)=>setPekerjaan(e.target.value)}
                     >
                       <option value="Guru">Guru</option>
                       <option value="Kepala Sekolah">Kepala Sekolah</option>
                       <option value="Staff">Staff</option>
-                      <option value="Lainnya">Lainnya / Tambah Baru...</option>
                     </select>
-                    {!['Guru', 'Kepala Sekolah', 'Staff'].includes(pekerjaan) && (
-                      <div className="mt-1.5">
-                        <input
-                          type="text"
-                          placeholder="Ketik pekerjaan baru..."
-                          className="w-full px-3 py-1.5 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 focus:outline-emerald-700 text-xs font-medium"
-                          value={pekerjaan}
-                          onChange={(e) => setPekerjaan(e.target.value)}
-                        />
-                      </div>
-                    )}
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase label-id">Nomor Handphone (WhatsApp)</label>
@@ -1542,32 +1799,13 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                     <label className="text-xs font-bold text-slate-400 label-id">Pekerjaan</label>
                     <select 
                       className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200"
-                      value={['Guru', 'Kepala Sekolah', 'Staff'].includes(editingMember.pekerjaan || '') ? (editingMember.pekerjaan || 'Guru') : 'Lainnya'} 
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val === 'Lainnya') {
-                          setEditingMember({...editingMember, pekerjaan: ''});
-                        } else {
-                          setEditingMember({...editingMember, pekerjaan: val});
-                        }
-                      }}
+                      value={editingMember.pekerjaan || 'Guru'} 
+                      onChange={(e)=>setEditingMember({...editingMember, pekerjaan: e.target.value})}
                     >
                       <option value="Guru">Guru</option>
                       <option value="Kepala Sekolah">Kepala Sekolah</option>
                       <option value="Staff">Staff</option>
-                      <option value="Lainnya">Lainnya / Tambah Baru...</option>
                     </select>
-                    {!['Guru', 'Kepala Sekolah', 'Staff'].includes(editingMember.pekerjaan || '') && (
-                      <div className="mt-1.5">
-                        <input
-                          type="text"
-                          placeholder="Ketik pekerjaan baru..."
-                          className="w-full px-3 py-1.5 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 focus:outline-emerald-700 text-xs font-medium"
-                          value={editingMember.pekerjaan || ''}
-                          onChange={(e) => setEditingMember({...editingMember, pekerjaan: e.target.value})}
-                        />
-                      </div>
-                    )}
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 label-id">Nomor Handphone (WhatsApp)</label>
@@ -1620,19 +1858,35 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                   </div>
                 )}
 
-                <div className="flex gap-2 pt-3 justify-end border-t border-slate-100 dark:border-slate-750">
+                <div className="flex items-center justify-between gap-2 pt-3 border-t border-slate-100 dark:border-slate-750">
                   <button 
-                    type="button" onClick={()=>setEditingMember(null)}
-                    className="px-4 py-2 border text-slate-500 bg-slate-150 rounded-lg hover:bg-slate-200 text-xs font-semibold"
+                    type="button"
+                    disabled={pinjaman.some(p => p.anggotaId === editingMember.id && p.status === 'Belum Lunas')}
+                    onClick={() => {
+                      const target = editingMember;
+                      setEditingMember(null);
+                      setMemberToDelete(target);
+                    }}
+                    className="px-3 py-2 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={pinjaman.some(p => p.anggotaId === editingMember.id && p.status === 'Belum Lunas') ? "Anggota memiliki pinjaman aktif" : "Hapus Anggota Ini"}
                   >
-                    Batal
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus Anggota</span>
                   </button>
-                  <button 
-                    type="submit"
-                    className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold"
-                  >
-                    Simpan Koreksi
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      type="button" onClick={()=>setEditingMember(null)}
+                      className="px-4 py-2 border text-slate-500 bg-slate-150 rounded-lg hover:bg-slate-200 text-xs font-semibold cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                    <button 
+                      type="submit"
+                      className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold cursor-pointer"
+                    >
+                      Simpan Koreksi
+                    </button>
+                  </div>
                 </div>
               </form>
             </motion.div>
@@ -1659,6 +1913,18 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                 {/* Header info */}
                 <div className="bg-slate-900 text-white p-6 relative shrink-0">
                   <div className="absolute top-4 right-4 flex items-center gap-2">
+                    <button 
+                      onClick={() => {
+                        const target = selectedLedgerMember;
+                        setSelectedLedgerMember(null);
+                        setMemberToDelete(target);
+                      }}
+                      disabled={fStat.activePinjaman.length > 0}
+                      className="bg-rose-600 hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold font-mono px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer shadow-sm transition-all"
+                      title={fStat.activePinjaman.length > 0 ? "Tidak dapat dihapus karena ada pinjaman aktif" : "Hapus Anggota Ini"}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Hapus Anggota
+                    </button>
                     <button 
                       onClick={() => handlePrintLedger(selectedLedgerMember, lSState, lPState, fStat)}
                       className="bg-emerald-700 hover:bg-emerald-600 dark:bg-emerald-800 dark:hover:bg-emerald-700 text-white font-semibold font-mono px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer shadow-sm transition-all"
@@ -1695,74 +1961,89 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                 {/* Main scrollable body */}
                 <div className="p-6 overflow-y-auto space-y-6">
                   {/* Summary row */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div className="bg-slate-50 dark:bg-slate-900 border rounded-xl p-4 text-center">
-                      <p className="text-xs text-slate-400 font-bold uppercase">Simpanan Pokok & Wajib</p>
-                      <p className="text-lg font-mono font-bold text-slate-800 dark:text-slate-100 mt-1">
-                        {formatRupiah(fStat.totalPokok + fStat.totalWajib)}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-150 dark:border-indigo-900 rounded-xl p-3 text-center">
+                      <p className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase tracking-wider">Simpanan Pokok</p>
+                      <p className="text-sm sm:text-base font-mono font-extrabold text-indigo-900 dark:text-indigo-200 mt-0.5">
+                        {formatRupiah(fStat.totalPokok)}
                       </p>
                     </div>
-                    <div className="bg-slate-50 dark:bg-slate-900 border rounded-xl p-4 text-center">
-                      <p className="text-xs text-slate-400 font-bold uppercase">Simpanan Sukarela</p>
-                      <p className="text-lg font-mono font-bold text-emerald-700 dark:text-emerald-400 mt-1">
+                    <div className="bg-amber-50/50 dark:bg-amber-950/20 border border-amber-150 dark:border-amber-900 rounded-xl p-3 text-center">
+                      <p className="text-[10px] text-amber-600 dark:text-amber-400 font-bold uppercase tracking-wider">Simpanan Wajib</p>
+                      <p className="text-sm sm:text-base font-mono font-extrabold text-amber-900 dark:text-amber-200 mt-0.5">
+                        {formatRupiah(fStat.totalWajib)}
+                      </p>
+                    </div>
+                    <div className="bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-150 dark:border-emerald-900 rounded-xl p-3 text-center">
+                      <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold uppercase tracking-wider">Simpanan Manasuka</p>
+                      <p className="text-sm sm:text-base font-mono font-extrabold text-emerald-900 dark:text-emerald-200 mt-0.5">
                         {formatRupiah(fStat.totalSukarela)}
                       </p>
                     </div>
-                    <div className="bg-slate-50 dark:bg-slate-900 border rounded-xl p-4 text-center">
-                      <p className="text-xs text-slate-400 font-bold uppercase">Pinjaman Aktif Beredar</p>
-                      <p className="text-lg font-mono font-bold text-rose-700 dark:text-rose-450 mt-1">
-                        {formatRupiah(fStat.totalPinjamanBeredar)}
+                    <div className="bg-teal-50/60 dark:bg-teal-950/30 border border-teal-200 dark:border-teal-800 rounded-xl p-3 text-center col-span-2 sm:col-span-1">
+                      <p className="text-[10px] text-teal-700 dark:text-teal-300 font-bold uppercase tracking-wider">Total Simpanan</p>
+                      <p className="text-sm sm:text-base font-mono font-black text-teal-900 dark:text-teal-100 mt-0.5">
+                        {formatRupiah(fStat.grandSimpanan)}
                       </p>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* Mutasi Simpanan */}
+                  <div className="bg-rose-50/50 dark:bg-rose-950/20 border border-rose-150 dark:border-rose-900 rounded-xl p-3 text-center">
+                    <p className="text-[10px] text-rose-600 dark:text-rose-400 font-bold uppercase tracking-wider">Pinjaman Aktif Beredar (Sisa Piutang / Hutang)</p>
+                    <p className="text-base font-mono font-extrabold text-rose-700 dark:text-rose-400 mt-0.5">
+                      {formatRupiah(fStat.totalPinjamanBeredar)}
+                    </p>
+                  </div>
+
+                  <div className="space-y-6">
+
+                    {/* Histori Mutasi Simpanan */}
                     <div className="space-y-2">
                       <h4 className="font-bold text-slate-700 dark:text-slate-200 border-b pb-2 text-sm uppercase tracking-wide flex items-center gap-1.5">
-                        <Wallet className="w-4 h-4 text-emerald-600"/> Histori Rekaman Tabungan
+                        <Wallet className="w-4 h-4 text-emerald-600"/> Histori Mutasi Simpanan (Pokok, Wajib, Manasuka)
                       </h4>
-                      <div className="max-h-[220px] overflow-y-auto border rounded-xl divide-y text-xs font-mono">
+                      <div className="max-h-[220px] overflow-y-auto border rounded-xl text-xs font-mono">
                         {lSState.length === 0 ? (
-                          <p className="text-slate-400 italic p-4 text-center">Belum ada mutasi simpanan</p>
+                          <p className="text-slate-400 italic p-4 text-center">Belum ada riwayat mutasi simpanan</p>
                         ) : (
-                          lSState.map((s) => (
-                            <div key={s.id} className="p-3 bg-slate-50/20 dark:bg-slate-900/10 flex justify-between items-center hover:bg-slate-100/30">
-                              <div className="flex-1 min-w-0 pr-2">
-                                <p className={`font-semibold ${s.jumlah < 0 ? 'text-rose-600 dark:text-rose-450 font-bold' : 'text-slate-700 dark:text-slate-200'}`}>
-                                  {s.jumlah < 0 ? 'Penarikan Sukarela' : s.jenis} ({s.tanggal})
-                                </p>
-                                <p className="text-[10px] text-slate-400 mt-0.5 truncate">{s.keterangan}</p>
-                              </div>
-                              <div className="flex items-center gap-3 shrink-0">
-                                <span className={`font-bold font-mono ${s.jumlah < 0 ? 'text-rose-600 dark:text-rose-450' : 'text-emerald-600'}`}>
-                                  {s.jumlah < 0 ? `-${formatRupiah(Math.abs(s.jumlah))}` : formatRupiah(s.jumlah)}
-                                </span>
-                                {(onEditSimpanan || onDeleteSimpanan) && (
-                                  <div className="flex items-center gap-1.5 ml-2">
-                                    {onEditSimpanan && (
-                                      <button 
-                                        onClick={() => startEditSimpanan(s)}
-                                        title="Edit Transaksi"
-                                        className="text-slate-400 hover:text-blue-600 p-1 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded transition-colors cursor-pointer"
-                                      >
-                                        <Edit className="w-3.5 h-3.5" />
-                                      </button>
-                                    )}
-                                    {onDeleteSimpanan && (
-                                      <button 
-                                        onClick={() => handleDeleteSimpClick(s.id)}
-                                        title="Hapus Transaksi"
-                                        className="text-slate-400 hover:text-rose-600 p-1 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded transition-colors cursor-pointer"
-                                      >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          ))
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse">
+                              <thead>
+                                <tr className="bg-slate-100 dark:bg-slate-900 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider border-b border-slate-200 dark:border-slate-800">
+                                  <th className="px-3 py-2">Tanggal</th>
+                                  <th className="px-3 py-2">No. Transaksi</th>
+                                  <th className="px-3 py-2">Jenis Simpanan</th>
+                                  <th className="px-3 py-2 text-right">Nominal Mutasi</th>
+                                  <th className="px-3 py-2">Keterangan</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-150 dark:divide-slate-750 text-slate-650 dark:text-slate-350">
+                                {lSState.map((s) => (
+                                  <tr key={s.id} className="hover:bg-slate-100/40 dark:hover:bg-slate-900/30">
+                                    <td className="px-3 py-2">{s.tanggal}</td>
+                                    <td className="px-3 py-2 font-mono text-[10px]">{s.transaksiId || `TRX-S-${s.id.substring(0, 6).toUpperCase()}`}</td>
+                                    <td className="px-3 py-2">
+                                      <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${
+                                        s.jumlah < 0 
+                                          ? 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-900' 
+                                          : s.jenis === 'Pokok' 
+                                            ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-900' 
+                                            : s.jenis === 'Wajib' 
+                                              ? 'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900' 
+                                              : 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-900'
+                                      }`}>
+                                        {s.jumlah < 0 ? 'Penarikan Sukarela' : `Simpanan ${s.jenis === 'Sukarela' ? 'Manasuka' : s.jenis}`}
+                                      </span>
+                                    </td>
+                                    <td className={`px-3 py-2 text-right font-bold ${s.jumlah < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-800 dark:text-slate-100'}`}>
+                                      {s.jumlah < 0 ? `-${formatRupiah(Math.abs(s.jumlah))}` : formatRupiah(s.jumlah)}
+                                    </td>
+                                    <td className="px-3 py-2 text-[10px] text-slate-450">{s.keterangan || '-'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1778,12 +2059,13 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                         ) : (
                           lPState.map((p) => {
                             const pPaid = angsuran.filter(a => a.pinjamanId === p.id).reduce((acc, c) => acc + c.jumlahBayar, 0);
-                            const remaining = p.status === 'Lunas' ? 0 : Math.max(0, Math.round(p.nominalPinjaman - (pPaid * (p.nominalPinjaman / p.totalWajibBayar))));
+                            const remaining = calculateLoanOutstanding(p, angsuran.filter(a => a.pinjamanId === p.id));
+                            const isLunas = p.status === 'Lunas' || remaining <= 0;
                             return (
                               <div key={p.id} className="p-3 bg-slate-50/20 dark:bg-slate-900/10 hover:bg-slate-100/30">
                                 <div className="flex justify-between items-center font-semibold">
                                   <span className="text-slate-700 dark:text-slate-200">Kontrak {p.tanggal} ({p.tenor} Bulan)</span>
-                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${p.status === 'Lunas' ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>{p.status}</span>
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isLunas ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>{isLunas ? 'Lunas' : 'Belum Lunas'}</span>
                                 </div>
                                 <div className="grid grid-cols-2 gap-2 mt-2 text-[10px] text-slate-500">
                                   <p>Plafond: {formatRupiah(p.nominalPinjaman)}</p>
@@ -1836,9 +2118,24 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
                                         <td className="px-3 py-2 text-center">
                                           <button
                                             onClick={() => {
-                                              if (window.confirm("Apakah Anda yakin ingin menghapus catatan angsuran ini? Tindakan ini akan menghapus data permanen dari database.")) {
-                                                onDeleteAngsuran(a.id);
-                                              }
+                                              const m = members.find(mem => mem.id === a.anggotaId);
+                                              setDeleteModalState({
+                                                isOpen: true,
+                                                itemType: 'Catatan Angsuran',
+                                                itemName: `Angsuran Bulan Ke-${a.bulanKe} - ${formatRupiah(a.jumlahBayar)}`,
+                                                itemDetails: [
+                                                  { label: 'Anggota', value: m ? `${m.nama} (${m.noAnggota})` : '-' },
+                                                  { label: 'Tanggal Pembayaran', value: a.tanggal },
+                                                  { label: 'Angsuran Bulan Ke', value: String(a.bulanKe) },
+                                                  { label: 'Jumlah Dibayar', value: formatRupiah(a.jumlahBayar), isHighlight: true },
+                                                  { label: 'Pokok / Jasa', value: `Pokok: ${formatRupiah(a.pokokBayar || 0)} | Jasa: ${formatRupiah(a.jasaBayar || 0)}` },
+                                                  { label: 'Keterangan', value: a.keterangan || '-' }
+                                                ],
+                                                warningMessage: 'Menghapus angsuran ini akan mengembalikan sisa pokok pinjaman dan memperbarui saldo kas koperasi secara otomatis.',
+                                                onConfirm: () => {
+                                                  onDeleteAngsuran(a.id);
+                                                }
+                                              });
                                             }}
                                             className="p-1 px-2 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/20 text-rose-600 dark:text-rose-350 rounded text-[9px] font-sans font-bold cursor-pointer transition flex items-center justify-center gap-0.5 mx-auto"
                                             title="Hapus Catatan Angsuran"
@@ -1866,53 +2163,81 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
 
       {/* CONFIRM MEMBER DELETION MODAL */}
       <AnimatePresence>
-        {memberToDelete && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-            <motion.div 
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-slate-150 dark:border-slate-800 p-6 flex flex-col space-y-4"
-            >
-              <div className="flex items-start gap-3">
-                <div className="p-3 bg-red-100 dark:bg-red-950/50 text-red-650 dark:text-red-400 rounded-full shrink-0">
-                  <AlertCircle className="w-6 h-6" />
-                </div>
-                <div className="space-y-1.5 text-left">
-                  <h3 className="font-extrabold text-base text-slate-850 dark:text-slate-100">Konfirmasi Hapus Anggota</h3>
-                  <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed font-semibold">
-                    Apakah anda yakin menghapus anggota karena anggota keluar koperasi?
-                  </p>
-                  <div className="p-3 bg-slate-50 dark:bg-slate-950/30 rounded-xl border border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400 space-y-1">
-                    <p>Nama: <span className="font-bold text-slate-800 dark:text-slate-200">{memberToDelete.nama}</span></p>
-                    <p>No Anggota: <span className="font-mono font-bold text-slate-800 dark:text-slate-200">{memberToDelete.noAnggota}</span></p>
-                    <p className="text-[10px] text-red-500 font-semibold mt-1">
-                      ⚠️ Tindakan ini akan menghapus permanen seluruh riwayat simpanan dan pinjaman anggota tersebut.
+        {memberToDelete && (() => {
+          const info = getMemberFinancialInfo(memberToDelete.id);
+          const hasActiveLoan = info.activePinjaman.length > 0;
+
+          return (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+              <motion.div 
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-slate-150 dark:border-slate-800 p-6 flex flex-col space-y-4"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="p-3 bg-red-100 dark:bg-red-950/50 text-red-650 dark:text-red-400 rounded-full shrink-0">
+                    <AlertCircle className="w-6 h-6" />
+                  </div>
+                  <div className="space-y-1.5 text-left w-full">
+                    <h3 className="font-extrabold text-base text-slate-850 dark:text-slate-100">Konfirmasi Hapus Anggota</h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-medium">
+                      Apakah Anda yakin ingin mengeluarkan dan menghapus data anggota berikut dari sistem koperasi?
                     </p>
+                    <div className="p-3.5 bg-slate-50 dark:bg-slate-950/40 rounded-xl border border-slate-200 dark:border-slate-800 text-xs space-y-1.5 mt-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">Nama Lengkap:</span>
+                        <span className="font-bold text-slate-800 dark:text-slate-200">{memberToDelete.nama}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">No. Anggota:</span>
+                        <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">{memberToDelete.noAnggota || '-'}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-500">No. HP:</span>
+                        <span className="font-mono text-slate-700 dark:text-slate-300">{memberToDelete.noHp || '-'}</span>
+                      </div>
+                      <div className="flex justify-between items-center pt-1 border-t border-slate-200 dark:border-slate-800">
+                        <span className="text-slate-500">Saldo Simpanan:</span>
+                        <span className="font-mono font-bold text-slate-800 dark:text-slate-200">{formatRupiah(info.grandSimpanan)}</span>
+                      </div>
+                      {hasActiveLoan && (
+                        <div className="p-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-lg text-[11px] text-amber-700 dark:text-amber-400 font-semibold flex items-center gap-1.5 mt-1">
+                          <span>⚠️ Anggota ini memiliki pinjaman aktif ({formatRupiah(info.totalPinjamanBeredar)}). Lunas pinjaman dahulu sebelum menghapus.</span>
+                        </div>
+                      )}
+                      {!hasActiveLoan && (
+                        <p className="text-[10px] text-red-500 font-semibold pt-1">
+                          ⚠️ Seluruh riwayat simpanan, mutasi, dan akun login anggota ini akan terhapus secara permanen.
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="flex items-center gap-3 pt-2">
-                <button 
-                  onClick={() => setMemberToDelete(null)}
-                  className="flex-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs py-2.5 rounded-xl cursor-pointer transition text-center font-sans"
-                >
-                  Batal
-                </button>
-                <button 
-                  onClick={async () => {
-                    onDeleteMember(memberToDelete.id);
-                    setMemberToDelete(null);
-                  }}
-                  className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold text-xs py-2.5 rounded-xl cursor-pointer transition text-center shadow-sm font-sans"
-                >
-                  Ya, Hapus Anggota
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
+                <div className="flex items-center gap-3 pt-2">
+                  <button 
+                    onClick={() => setMemberToDelete(null)}
+                    className="flex-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs py-2.5 rounded-xl cursor-pointer transition text-center font-sans"
+                  >
+                    Batal
+                  </button>
+                  <button 
+                    disabled={hasActiveLoan}
+                    onClick={async () => {
+                      onDeleteMember(memberToDelete.id);
+                      setMemberToDelete(null);
+                    }}
+                    className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs py-2.5 rounded-xl cursor-pointer transition text-center shadow-xs font-sans flex items-center justify-center gap-1.5"
+                  >
+                    <Trash2 className="w-3.5 h-3.5"/>
+                    <span>Ya, Hapus Anggota</span>
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
 
       {/* KTA PREVIEW MODAL */}
@@ -2185,115 +2510,184 @@ export function AnggotaView({ setup, pengurusPengawas, members, simpanan, pinjam
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
-        {/* WhatsApp Verification Notification Modal */}
-        {verificationWA && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-[100] p-4 font-sans text-xs">
-            {/* Backdrop */}
+      {/* IMPORT EXCEL MODAL */}
+      <AnimatePresence>
+        {isImportOpen && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-[60] p-4 overflow-y-auto">
             <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setVerificationWA(null)}
-              className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs"
-            />
-
-            <motion.div 
-              initial={{ scale: 0.95, opacity: 0, y: 15 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 15 }}
-              className="relative bg-white dark:bg-slate-900 rounded-3xl border border-slate-150 dark:border-slate-800 shadow-2xl max-w-md w-full overflow-hidden flex flex-col max-h-[90vh] z-10"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-5 my-8"
             >
-              <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50">
-                <div className="flex items-center gap-2">
-                  <span className="p-2 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 rounded-xl">
-                    <Phone className="w-4 h-4" />
-                  </span>
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2.5 bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 rounded-xl">
+                    <FileSpreadsheet className="w-5 h-5" />
+                  </div>
                   <div>
-                    <h3 className="font-bold text-slate-850 dark:text-slate-100 text-sm">Verifikasi & Notifikasi WA</h3>
-                    <p className="text-[10px] text-slate-455 dark:text-slate-400 mt-0.5">Kirim No. Anggota resmi via WhatsApp</p>
+                    <h3 className="font-extrabold text-base text-slate-800 dark:text-slate-100">Import Data Anggota dari Excel</h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">Unggah berkas spreadsheet (.xlsx, .xls, .csv) untuk pendaftaran masal</p>
                   </div>
                 </div>
                 <button 
-                  onClick={() => setVerificationWA(null)}
-                  className="p-1.5 hover:bg-slate-150 dark:hover:bg-slate-850 text-slate-400 rounded-lg transition cursor-pointer"
+                  type="button"
+                  onClick={() => setIsImportOpen(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg transition cursor-pointer"
                 >
-                  <X className="w-4 h-4" />
+                  <X className="w-5 h-5"/>
                 </button>
               </div>
 
-              <div className="p-5 space-y-4 overflow-y-auto">
-                <div className="bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/50 rounded-2xl p-4 flex gap-3">
-                  <div className="p-2 bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 rounded-full h-fit shrink-0">
-                    <CheckCircle2 className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-slate-800 dark:text-slate-200">Aktivasi Anggota Berhasil!</h4>
-                    <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
-                      Anggota <strong>{verificationWA.member.nama}</strong> telah berhasil diaktifkan dengan No. Anggota: <strong>{verificationWA.nextCode}</strong>.
-                    </p>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-slate-500 font-bold mb-1">Nomor WhatsApp Anggota:</label>
-                  <div className="flex items-center gap-2 px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-850 dark:text-slate-100 font-mono font-bold">
-                    <Phone className="w-3.5 h-3.5 text-slate-400" />
-                    <span>{verificationWA.member.noHp}</span>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-slate-500 font-bold mb-1">Preview Pesan WA:</label>
-                  <textarea 
-                    rows={8}
-                    value={verificationWA.messageText}
-                    onChange={(e) => setVerificationWA({ ...verificationWA, messageText: e.target.value })}
-                    className="w-full px-3 py-2 border rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium leading-relaxed"
-                    placeholder="Tulis pesan..."
-                  />
-                  <p className="text-[9px] text-slate-400 mt-1 italic">
-                    *Anda dapat menyesuaikan kembali isi template pesan di atas sebelum dikirimkan.
+              {/* Template Banner */}
+              <div className="p-4 bg-emerald-50/70 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <p className="text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0"/>
+                    Gunakan Format Template Resmi
+                  </p>
+                  <p className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80">
+                    Unduh contoh format file Excel dengan struktur kolom yang direkomendasikan.
                   </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleDownloadTemplate}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition flex items-center justify-center gap-1.5 shadow-xs cursor-pointer shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5"/>
+                  <span>Unduh Template</span>
+                </button>
+              </div>
 
-                <div className="flex gap-2 pt-2">
-                  <button 
-                    type="button"
-                    onClick={() => setVerificationWA(null)}
-                    className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 text-center font-bold transition cursor-pointer"
-                  >
-                    Batal
-                  </button>
-                  {(() => {
-                    const cleanPhone = verificationWA.member.noHp.replace(/\D/g, '');
-                    let phone62 = cleanPhone;
-                    if (cleanPhone.startsWith('0')) {
-                      phone62 = '62' + cleanPhone.substring(1);
-                    } else if (!cleanPhone.startsWith('62') && cleanPhone.length > 0) {
-                      phone62 = '62' + cleanPhone;
-                    }
-                    const waUrl = `https://wa.me/${phone62}?text=${encodeURIComponent(verificationWA.messageText)}`;
-                    
-                    return (
-                      <a 
-                        href={waUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={() => setVerificationWA(null)}
-                        className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold shadow-sm hover:shadow transition cursor-pointer flex items-center justify-center gap-1.5 text-center text-xs"
-                      >
-                        <Send className="w-3.5 h-3.5" />
-                        Kirim via WhatsApp
-                      </a>
-                    );
-                  })()}
+              {/* File Upload Dropzone */}
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                  Pilih Berkas Excel / CSV
+                </label>
+                <div className="relative border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 dark:hover:border-blue-400 rounded-xl p-6 text-center bg-slate-50/50 dark:bg-slate-950/30 transition">
+                  <input 
+                    type="file" 
+                    accept=".xlsx, .xls, .csv"
+                    onChange={handleFileChange}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                  <div className="flex flex-col items-center justify-center space-y-2 pointer-events-none">
+                    <div className="p-3 bg-blue-100/70 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 rounded-full">
+                      <Upload className="w-6 h-6" />
+                    </div>
+                    {importFile ? (
+                      <div>
+                        <p className="text-xs font-bold text-slate-800 dark:text-slate-200">{importFile.name}</p>
+                        <p className="text-[10px] text-slate-400 font-mono">{(importFile.size / 1024).toFixed(1)} KB</p>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          Klik untuk memilih berkas atau drag & drop di sini
+                        </p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">Format didukung: .xlsx, .xls, .csv</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
+              </div>
+
+              {/* Error Alert */}
+              {importError && (
+                <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-xl flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300 font-medium">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500"/>
+                  <span>{importError}</span>
+                </div>
+              )}
+
+              {/* Preview Table */}
+              {importParsedData && importParsedData.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700 dark:text-slate-200">
+                    <span>Pratinjau Data Impor ({importParsedData.length} Anggota Siap Diimpor)</span>
+                    <span className="text-emerald-600 dark:text-emerald-400 text-[11px] font-semibold">Valid</span>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 sticky top-0 font-bold">
+                        <tr>
+                          <th className="p-2.5">No</th>
+                          <th className="p-2.5">ID Anggota</th>
+                          <th className="p-2.5">Nama Lengkap</th>
+                          <th className="p-2.5">JK</th>
+                          <th className="p-2.5">No HP</th>
+                          <th className="p-2.5">Alamat</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {importParsedData.map((m, idx) => (
+                          <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 text-slate-700 dark:text-slate-300">
+                            <td className="p-2.5 text-slate-400 font-mono">{idx + 1}</td>
+                            <td className="p-2.5 font-mono font-semibold text-emerald-600 dark:text-emerald-400">{m.noAnggota}</td>
+                            <td className="p-2.5 font-bold">{m.nama}</td>
+                            <td className="p-2.5">{m.jenisKelamin}</td>
+                            <td className="p-2.5 font-mono">{m.noHp}</td>
+                            <td className="p-2.5 truncate max-w-[150px]">{m.alamat}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Footer Actions */}
+              <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <button 
+                  type="button"
+                  onClick={() => setIsImportOpen(false)}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl cursor-pointer transition"
+                >
+                  Batal
+                </button>
+                <button 
+                  type="button"
+                  disabled={!importParsedData || importParsedData.length === 0 || isImporting}
+                  onClick={handleConfirmImport}
+                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl cursor-pointer transition shadow-sm flex items-center gap-1.5"
+                >
+                  {isImporting ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"/>
+                      <span>Mengimpor...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4"/>
+                      <span>Konfirmasi Import ({importParsedData ? importParsedData.length : 0} Data)</span>
+                    </>
+                  )}
+                </button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
+
+      <ConfirmDeleteModal
+        isOpen={!!deleteModalState?.isOpen}
+        title={deleteModalState ? `Hapus ${deleteModalState.itemType}` : undefined}
+        itemType={deleteModalState?.itemType}
+        itemName={deleteModalState?.itemName}
+        itemDetails={deleteModalState?.itemDetails}
+        warningMessage={deleteModalState?.warningMessage}
+        onConfirm={async () => {
+          if (deleteModalState?.onConfirm) {
+            await deleteModalState.onConfirm();
+          }
+          setDeleteModalState(null);
+        }}
+        onClose={() => setDeleteModalState(null)}
+      />
     </div>
   );
 }
@@ -2303,11 +2697,13 @@ interface SimpananProps {
   setup: KoperasiSetup;
   members: Member[];
   simpanan: Simpanan[];
+  pinjaman?: Pinjaman[];
+  angsuran?: Angsuran[];
   onAddSimpanan: (s: Omit<Simpanan, 'id'> | Omit<Simpanan, 'id'>[]) => void;
   onPostManasukaBunga: (logs: Omit<ManasukaBungaLog, 'id'>, autoPostSukarela: boolean) => void;
 }
 
-export function SimpananView({ setup, members, simpanan, onAddSimpanan, onPostManasukaBunga }: SimpananProps) {
+export function SimpananView({ setup, members, simpanan, pinjaman = [], angsuran = [], onAddSimpanan, onPostManasukaBunga }: SimpananProps) {
   // Combined Form States
   const [anggotaId, setAnggotaId] = useState('');
   const [jumlahPokok, setJumlahPokok] = useState('50.000');
@@ -2372,23 +2768,51 @@ export function SimpananView({ setup, members, simpanan, onAddSimpanan, onPostMa
     tanggal: string;
   } | null>(null);
 
+  const sortedMembers = useMemo(() => sortMembersNaturally(members), [members]);
   const [filterAnggotaOpt, setFilterAnggotaOpt] = useState('');
   const [filterJenisOpt, setFilterJenisOpt] = useState('');
+  const [formMemberSearch, setFormMemberSearch] = useState('');
+  const [tableSearchTerm, setTableSearchTerm] = useState('');
+
+  const formFilteredMembers = useMemo(() => {
+    if (!formMemberSearch.trim()) return sortedMembers;
+    const q = formMemberSearch.toLowerCase().trim();
+    return sortedMembers.filter(m => 
+      m.nama.toLowerCase().includes(q) || 
+      m.noAnggota.toLowerCase().includes(q) ||
+      (m.noHp && m.noHp.includes(q))
+    );
+  }, [sortedMembers, formMemberSearch]);
 
   const filteredHistory = useMemo(() => {
     return simpanan.filter(s => {
+      const mb = members.find(m => m.id === s.anggotaId);
       const matchAnggota = filterAnggotaOpt === '' || s.anggotaId === filterAnggotaOpt;
       const matchJenis = filterJenisOpt === '' || s.jenis === filterJenisOpt;
-      return matchAnggota && matchJenis;
+
+      let matchSearch = true;
+      if (tableSearchTerm.trim()) {
+        const q = tableSearchTerm.toLowerCase().trim();
+        const namaMatch = mb ? mb.nama.toLowerCase().includes(q) : false;
+        const noAnggotaMatch = mb ? mb.noAnggota.toLowerCase().includes(q) : false;
+        const noHpMatch = mb ? (mb.noHp && mb.noHp.includes(q)) : false;
+        const txIdMatch = s.transaksiId ? s.transaksiId.toLowerCase().includes(q) : false;
+        const ketMatch = s.keterangan ? s.keterangan.toLowerCase().includes(q) : false;
+        matchSearch = namaMatch || noAnggotaMatch || noHpMatch || txIdMatch || ketMatch;
+      }
+
+      return matchAnggota && matchJenis && matchSearch;
     }).sort((a,b) => b.tanggal.localeCompare(a.tanggal));
-  }, [simpanan, filterAnggotaOpt, filterJenisOpt]);
+  }, [simpanan, filterAnggotaOpt, filterJenisOpt, tableSearchTerm, members]);
 
   const viewReceiptForTxId = (txId: string, itemFallback: Simpanan) => {
     const member = members.find(m => m.id === itemFallback.anggotaId);
     if (!member) return;
 
     // Filter all savings with this txId, or fallback to just itself if no txId
-    let matchingItems = simpanan.filter(s => s.transaksiId === txId);
+    let matchingItems = (txId && txId.trim() !== '' && txId !== itemFallback.id)
+      ? simpanan.filter(s => s.transaksiId === txId && s.anggotaId === itemFallback.anggotaId)
+      : [itemFallback];
     if (matchingItems.length === 0) {
       matchingItems = [itemFallback];
     }
@@ -2765,17 +3189,29 @@ export function SimpananView({ setup, members, simpanan, onAddSimpanan, onPostMa
           <form onSubmit={handleSimpananSubmit} className="space-y-4 text-sm">
             <div className="space-y-1">
               <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 label-id">PILIH ANGGOTA SETORAN</label>
-              <select 
-                className="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 focus:outline-emerald-700 font-medium"
-                value={anggotaId}
-                onChange={(e) => setAnggotaId(e.target.value)}
-                required
-              >
-                <option value="">-- Cari Nama / ID Anggota --</option>
-                {members.map(m => (
-                  <option key={m.id} value={m.id}>{m.noAnggota} - {m.nama}</option>
-                ))}
-              </select>
+              <div className="space-y-1.5">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Ketik untuk filter listbox ID / Nama Anggota..."
+                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
+                    value={formMemberSearch}
+                    onChange={(e) => setFormMemberSearch(e.target.value)}
+                  />
+                </div>
+                <select 
+                  className="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 focus:outline-emerald-700 font-medium"
+                  value={anggotaId}
+                  onChange={(e) => setAnggotaId(e.target.value)}
+                  required
+                >
+                  <option value="">-- Pilih Anggota ({formFilteredMembers.length}) --</option>
+                  {formFilteredMembers.map(m => (
+                    <option key={m.id} value={m.id}>{m.nama} ({m.noAnggota})</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -2891,15 +3327,25 @@ export function SimpananView({ setup, members, simpanan, onAddSimpanan, onPostMa
               Riwayat Mutasi Tabungan Koperasi
             </h3>
             {/* Filters */}
-            <div className="flex gap-2 text-xs">
+            <div className="flex items-center gap-2 text-xs flex-wrap">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                <input 
+                  type="text"
+                  placeholder="Cari Nama / ID Anggota / Resi..."
+                  className="pl-8 pr-3 py-1 text-xs border rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 outline-none w-44 sm:w-56 focus:border-emerald-500 font-medium"
+                  value={tableSearchTerm}
+                  onChange={(e) => setTableSearchTerm(e.target.value)}
+                />
+              </div>
               <select 
                 className="p-1 px-2 border rounded bg-slate-50 dark:bg-slate-900 dark:text-slate-200 text-slate-600 outline-none"
                 value={filterAnggotaOpt}
                 onChange={(e) => setFilterAnggotaOpt(e.target.value)}
               >
                 <option value="">Semua Anggota</option>
-                {members.map(m => (
-                  <option key={m.id} value={m.id}>{m.nama}</option>
+                {sortedMembers.map(m => (
+                  <option key={m.id} value={m.id}>{m.nama} ({m.noAnggota})</option>
                 ))}
               </select>
               <select 
@@ -3205,18 +3651,44 @@ export function SimpananView({ setup, members, simpanan, onAddSimpanan, onPostMa
               </div>
 
               {/* Action buttons (Non-Printable zone) */}
-              <div className="flex items-center gap-3 pt-2">
+              <div className="flex flex-wrap items-center gap-2 pt-2">
+                <button 
+                  onClick={() => {
+                    const total = receiptData.items ? receiptData.items.reduce((s, c) => s + c.jumlah, 0) : 0;
+                    const jenisList = (receiptData.items || []).map(i => `Simpanan ${i.jenis}`).join(', ');
+
+                    const resume = calculateMemberLedgerResume(receiptData.member.id, simpanan, pinjaman, angsuran);
+                    const url = createWhatsAppThankYouUrl(
+                      receiptData.member.noHp,
+                      receiptData.member.nama,
+                      receiptData.member.noAnggota,
+                      setup?.namaKoperasi || 'KOPERASI',
+                      jenisList || 'Pembayaran Simpanan',
+                      total,
+                      receiptData.tanggal,
+                      receiptData.txId,
+                      receiptData.items?.[0]?.keterangan,
+                      resume,
+                      receiptData.member.id
+                    );
+                    window.open(url, '_blank');
+                  }}
+                  className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg cursor-pointer transition text-center flex items-center justify-center gap-1.5 shadow"
+                  title="Kirim Ucapan Terima Kasih via WhatsApp"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" /> WA Terima Kasih
+                </button>
                 <button 
                   onClick={() => handlePrintSavingsReceipt(receiptData)}
-                  className="flex-1 bg-slate-800 hover:bg-slate-900 border text-white font-bold text-xs py-2 rounded-lg cursor-pointer transition text-center"
+                  className="flex-1 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs py-2 px-3 rounded-lg cursor-pointer transition text-center flex items-center justify-center gap-1.5 shadow"
                 >
-                  Cetak / Simpan PDF Struk
+                  <Printer className="w-3.5 h-3.5" /> Cetak PDF
                 </button>
                 <button 
                   onClick={() => setReceiptData(null)}
-                  className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs py-2 rounded-lg cursor-pointer transition text-center"
+                  className="px-3 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs py-2 rounded-lg cursor-pointer transition text-center"
                 >
-                  Selesai & Tutup
+                  Selesai
                 </button>
               </div>
             </motion.div>
@@ -3230,51 +3702,412 @@ export function SimpananView({ setup, members, simpanan, onAddSimpanan, onPostMa
 // ================= LOAN / FINANCING SCHEDULER (PINJAMAN DENGAN 1% PROVISI) =================
 interface PinjamanProps {
   setup: KoperasiSetup;
+  pengurusPengawas?: PengurusPengawas[];
   members: Member[];
   pinjaman: Pinjaman[];
   angsuran: Angsuran[];
+  simpanan?: Simpanan[];
+  piutangWarung?: PiutangWarung[];
   onAddPinjaman: (p: Omit<Pinjaman, 'id'>) => void;
   onEditPinjaman: (p: Pinjaman) => void;
   onDeletePinjaman: (id: string) => void;
   pengajuanPinjaman: PengajuanPinjaman[];
-  onApprovePengajuanPinjaman: (id: string, catatan?: string, customNominal?: number) => void;
+  onApprovePengajuanPinjaman: (id: string, catatan?: string, customNominal?: number, isPartial?: boolean) => void;
   onRejectPengajuanPinjaman: (id: string, catatan?: string) => void;
   availableCash?: number;
+  initialSearchTerm?: string;
+  initialAnggotaId?: string;
+  initialPinjamanId?: string;
+  onNavigateToAngsuran?: (angsuranId?: string, memberId?: string, query?: string) => void;
 }
 
 export function PinjamanView({ 
   setup, 
+  pengurusPengawas,
   members, 
   pinjaman, 
   angsuran, 
+  simpanan,
+  piutangWarung,
   onAddPinjaman, 
   onEditPinjaman, 
   onDeletePinjaman,
   pengajuanPinjaman,
   onApprovePengajuanPinjaman,
   onRejectPengajuanPinjaman,
-  availableCash = 0
+  availableCash = 0,
+  initialSearchTerm,
+  initialAnggotaId,
+  initialPinjamanId,
+  onNavigateToAngsuran
 }: PinjamanProps) {
+  const sortedMembers = useMemo(() => sortMembersNaturally(members), [members]);
+  
+  const namaKetua = useMemo(() => {
+    const ketuaObj = (pengurusPengawas || []).find(p => 
+      p.jabatan === 'pengurus' && 
+      (p.peranDetail || '').toLowerCase().includes('ketua')
+    );
+    return ketuaObj ? ketuaObj.nama : 'H. Ahmad Sutejo, S.E.';
+  }, [pengurusPengawas]);
+
+  const namaBendahara = useMemo(() => {
+    const bendaharaObj = (pengurusPengawas || []).find(p => 
+      p.jabatan === 'pengurus' && 
+      (p.peranDetail || '').toLowerCase().includes('bendahara')
+    );
+    return bendaharaObj ? bendaharaObj.nama : 'Drs. Bambang Wijaya';
+  }, [pengurusPengawas]);
   const [anggotaId, setAnggotaId] = useState('');
   const [nominalStr, setNominalStr] = useState('');
   const [tenor, setTenor] = useState(10);
   const [bungaFlat, setBungaFlat] = useState(1.5); // user-inputted basis % per month
   const [pDate, setPDate] = useState(new Date().toISOString().substring(0, 10));
+  const [isDipotongProvisi, setIsDipotongProvisi] = useState(true);
+
+  const [formMemberSearch, setFormMemberSearch] = useState('');
+  const [tableSearchTerm, setTableSearchTerm] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
+  const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>('semua');
+  const [loanViewMode, setLoanViewMode] = useState<'table' | 'grouped_month'>('table');
+
+  const availableLoanMonths = useMemo(() => {
+    const setMonths = new Set<string>();
+    pinjaman.forEach(p => {
+      if (p.tanggal && p.tanggal.length >= 7) {
+        setMonths.add(p.tanggal.substring(0, 7));
+      }
+    });
+    return Array.from(setMonths).sort().reverse();
+  }, [pinjaman]);
+
+  useEffect(() => {
+    if (initialSearchTerm !== undefined && initialSearchTerm !== '') {
+      setTableSearchTerm(initialSearchTerm);
+      setAdminSubTab('kontrak');
+      setFilterStatus('');
+    }
+  }, [initialSearchTerm]);
+
+  useEffect(() => {
+    if (initialAnggotaId) {
+      const targetM = members.find(m => m.id === initialAnggotaId);
+      if (targetM) {
+        setTableSearchTerm(targetM.nama);
+      }
+      setAdminSubTab('kontrak');
+      setFilterStatus('');
+    }
+  }, [initialAnggotaId, members]);
+
+  useEffect(() => {
+    if (initialPinjamanId) {
+      setTableSearchTerm(initialPinjamanId);
+      setAdminSubTab('kontrak');
+      setFilterStatus('');
+    }
+  }, [initialPinjamanId]);
+
+  const formFilteredMembers = useMemo(() => {
+    if (!formMemberSearch.trim()) return sortedMembers;
+    const q = formMemberSearch.toLowerCase().trim();
+    return sortedMembers.filter(m => 
+      m.nama.toLowerCase().includes(q) || 
+      m.noAnggota.toLowerCase().includes(q) ||
+      (m.noHp && m.noHp.includes(q))
+    );
+  }, [sortedMembers, formMemberSearch]);
+
+  const filteredPinjaman = useMemo(() => {
+    const list = pinjaman.filter(p => {
+      const mInfo = members.find(m => m.id === p.anggotaId);
+      const matchStatus = filterStatus === '' || p.status === filterStatus;
+      const pMonth = p.tanggal ? p.tanggal.substring(0, 7) : '';
+      const matchMonth = selectedMonthFilter === 'semua' || pMonth === selectedMonthFilter;
+      let matchSearch = true;
+      if (tableSearchTerm.trim()) {
+        const q = tableSearchTerm.toLowerCase().trim();
+        const namaMatch = mInfo ? mInfo.nama.toLowerCase().includes(q) : false;
+        const noAnggotaMatch = mInfo ? mInfo.noAnggota.toLowerCase().includes(q) : false;
+        const noHpMatch = mInfo ? (mInfo.noHp && mInfo.noHp.includes(q)) : false;
+        const idMatch = p.id ? p.id.toLowerCase().includes(q) : false;
+        const tglMatch = p.tanggal ? p.tanggal.includes(q) : false;
+        matchSearch = namaMatch || noAnggotaMatch || noHpMatch || idMatch || tglMatch;
+      }
+      return matchStatus && matchMonth && matchSearch;
+    });
+
+    return list.sort((a, b) => {
+      // Urutkan tanggal terbaru paling atas
+      const dateCmp = (b.tanggal || '').localeCompare(a.tanggal || '');
+      if (dateCmp !== 0) return dateCmp;
+      const mA = members.find(m => m.id === a.anggotaId);
+      const mB = members.find(m => m.id === b.anggotaId);
+      const noA = mA ? (mA.noAnggota || '') : '';
+      const noB = mB ? (mB.noAnggota || '') : '';
+      return noA.localeCompare(noB, undefined, { numeric: true, sensitivity: 'base' });
+    });
+  }, [pinjaman, tableSearchTerm, filterStatus, selectedMonthFilter, members]);
+
+  // Kelompokkan pinjaman per bulan untuk mode tampilan grup bulanan
+  const loansGroupedByMonth = useMemo(() => {
+    const monthMap = new Map<string, Pinjaman[]>();
+
+    filteredPinjaman.forEach(p => {
+      const ym = p.tanggal ? p.tanggal.substring(0, 7) : 'Lainnya';
+      if (!monthMap.has(ym)) {
+        monthMap.set(ym, []);
+      }
+      monthMap.get(ym)!.push(p);
+    });
+
+    const sortedMonthKeys = Array.from(monthMap.keys()).sort().reverse();
+
+    return sortedMonthKeys.map(ym => {
+      const monthLoans = monthMap.get(ym)!;
+      const totalNominal = monthLoans.reduce((sum, item) => sum + (Number(item.nominalPinjaman) || 0), 0);
+      const totalDisbursed = monthLoans.reduce((sum, item) => sum + (Number(item.jumlahDiterima) || 0), 0);
+      const totalProvisi = monthLoans.reduce((sum, item) => sum + (Number(item.provisiDipotong) || 0), 0);
+      const totalAngsuranBln = monthLoans.reduce((sum, item) => sum + (Number(item.totalAngsuranPerBulan) || 0), 0);
+
+      return {
+        monthKey: ym,
+        monthLabel: ym === 'Lainnya' ? 'Lainnya' : formatYearMonthIndo(ym),
+        loans: monthLoans,
+        totalNominal,
+        totalDisbursed,
+        totalProvisi,
+        totalAngsuranBln
+      };
+    });
+  }, [filteredPinjaman]);
+
+  // Statistik ringkasan untuk filter yang aktif
+  const loanStats = useMemo(() => {
+    const count = filteredPinjaman.length;
+    const totalPlafon = filteredPinjaman.reduce((s, p) => s + (Number(p.nominalPinjaman) || 0), 0);
+    const totalDisbursed = filteredPinjaman.reduce((s, p) => s + (Number(p.jumlahDiterima) || 0), 0);
+    const totalProvisi = filteredPinjaman.reduce((s, p) => s + (Number(p.provisiDipotong) || 0), 0);
+    const totalAngsuranBln = filteredPinjaman.reduce((s, p) => s + (Number(p.totalAngsuranPerBulan) || 0), 0);
+    const countLunas = filteredPinjaman.filter(p => {
+      const repays = angsuran.filter(a => a.pinjamanId === p.id);
+      const sisa = calculateLoanOutstanding(p, repays);
+      return p.status === 'Lunas' || sisa <= 0;
+    }).length;
+    const countBelumLunas = count - countLunas;
+
+    return {
+      count,
+      totalPlafon,
+      totalDisbursed,
+      totalProvisi,
+      totalAngsuranBln,
+      countLunas,
+      countBelumLunas
+    };
+  }, [filteredPinjaman, angsuran]);
+
+  // Export Excel Transaksi Akad Kredit Bulanan
+  const handleExportLoanContractsExcel = () => {
+    const title = selectedMonthFilter !== 'semua'
+      ? `Transaksi_Akad_Kredit_${selectedMonthFilter}`
+      : 'Semua_Transaksi_Akad_Kredit';
+
+    const excelData = filteredPinjaman.map((p, idx) => {
+      const mInfo = members.find(m => m.id === p.anggotaId);
+      const repays = angsuran.filter(a => a.pinjamanId === p.id);
+      const sisaPinjaman = calculateLoanOutstanding(p, repays);
+      const isLoanLunas = p.status === 'Lunas' || sisaPinjaman <= 0;
+      return {
+        'No': idx + 1,
+        'ID Kontrak': p.id,
+        'Tanggal Akad': p.tanggal,
+        'Bulan Periode': p.tanggal ? formatYearMonthIndo(p.tanggal.substring(0, 7)) : '-',
+        'No Anggota': mInfo?.noAnggota || '-',
+        'Nama Peminjam': mInfo?.nama || 'N/A',
+        'No WhatsApp / HP': mInfo?.noHp || '-',
+        'Plafon Kredit (Rp)': p.nominalPinjaman,
+        'Provisi Rate (%)': p.biayaProvisiPersen,
+        'Potongan Provisi (Rp)': p.provisiDipotong,
+        'Dana Diterima / Disbursed (Rp)': p.jumlahDiterima,
+        'Tenor (Bulan)': p.tenor,
+        'Jasa Koperasi (%)': p.bungaFlatPersen,
+        'Cicilan Pokok / Bln (Rp)': p.angsuranPokokPerBulan,
+        'Cicilan Jasa / Bln (Rp)': p.jasaPerBulan,
+        'Total Tagihan / Bln (Rp)': p.totalAngsuranPerBulan,
+        'Total Wajib Bayar (Rp)': p.totalWajibBayar,
+        'Sisa Saldo Pinjaman (Rp)': sisaPinjaman,
+        'Status Pelunasan': isLoanLunas ? 'Lunas' : 'Belum Lunas'
+      };
+    });
+
+    exportToExcel(excelData, 'Akad Kredit', title, setup);
+  };
+
+  const filteredPengajuan = useMemo(() => {
+    return pengajuanPinjaman.filter(p => {
+      const mInfo = members.find(m => m.id === p.anggotaId);
+      let matchSearch = true;
+      if (tableSearchTerm.trim()) {
+        const q = tableSearchTerm.toLowerCase().trim();
+        const namaMatch = mInfo ? mInfo.nama.toLowerCase().includes(q) : false;
+        const noAnggotaMatch = mInfo ? mInfo.noAnggota.toLowerCase().includes(q) : false;
+        const noHpMatch = mInfo ? (mInfo.noHp && mInfo.noHp.includes(q)) : false;
+        const idMatch = p.id ? p.id.toLowerCase().includes(q) : false;
+        const alasanMatch = p.alasanPengajuan ? p.alasanPengajuan.toLowerCase().includes(q) : false;
+        matchSearch = namaMatch || noAnggotaMatch || noHpMatch || idMatch || alasanMatch;
+      }
+      return matchSearch;
+    });
+  }, [pengajuanPinjaman, tableSearchTerm, members]);
 
   // Admin sub tab toggle (Akad Aktif vs Pengajuan)
   const [adminSubTab, setAdminSubTab] = useState<'kontrak' | 'pengajuan'>('kontrak');
 
-  // Interactive approval/rejection notes modal
-  const [actionModal, setActionModal] = useState<{ id: string; type: 'APPROVE' | 'REJECT' } | null>(null);
+  // Interactive approval/rejection notes modal (APPROVE = full, PARTIAL = partial approved, REJECT = rejected)
+  const [actionModal, setActionModal] = useState<{ id: string; type: 'APPROVE' | 'PARTIAL' | 'REJECT' } | null>(null);
   const [catatanPengurusForm, setCatatanPengurusForm] = useState('');
   const [approvedNominalStr, setApprovedNominalStr] = useState('');
+  const [aiModalProposal, setAiModalProposal] = useState<PengajuanPinjaman | null>(null);
+  const [showLoanRecommendation, setShowLoanRecommendation] = useState(false);
 
-  const handleActionWithNotes = (id: string, type: 'APPROVE' | 'REJECT') => {
+  const getMemberFinancialSummary = (mId: string, propNominal: number, propTenor: number): FinancialMemberSummary => {
+    const mSimpanan = (simpanan || []).filter(s => s.anggotaId === mId);
+    const sPokok = mSimpanan.filter(s => s.jenis === 'Pokok').reduce((sum, s) => sum + (s.jumlah || 0), 0);
+    const sWajib = mSimpanan.filter(s => s.jenis === 'Wajib').reduce((sum, s) => sum + (s.jumlah || 0), 0);
+    const sSukarela = mSimpanan.filter(s => s.jenis === 'Sukarela').reduce((sum, s) => sum + (s.jumlah || 0), 0);
+    const totalS = sPokok + sWajib + sSukarela;
+
+    const mPinjaman = (pinjaman || []).filter(p => p.anggotaId === mId);
+    const mAngsuran = (angsuran || []).filter(a => a.anggotaId === mId);
+    const activeLoanObj = mPinjaman.find(p => p.status === 'Belum Lunas');
+    const lunasLoans = mPinjaman.filter(p => p.status === 'Lunas');
+
+    let sisaHutangAktif = 0;
+    if (activeLoanObj) {
+      const paidForThis = mAngsuran.filter(a => a.pinjamanId === activeLoanObj.id).reduce((sum, a) => sum + (a.jumlahBayar || 0), 0);
+      sisaHutangAktif = Math.max(0, (activeLoanObj.totalWajibBayar || 0) - paidForThis);
+    }
+
+    const mPiutang = (piutangWarung || []).filter(pw => pw.anggotaId === mId);
+    const totalHutangBaru = mPiutang.filter(pw => pw.jenis === 'hutang_baru').reduce((sum, pw) => sum + (pw.nominal || 0), 0);
+    const totalPelunasan = mPiutang.filter(pw => pw.jenis === 'pelunasan').reduce((sum, pw) => sum + (pw.nominal || 0), 0);
+    const sisaHutangWarung = Math.max(0, totalHutangBaru - totalPelunasan);
+
+    const totalAngsuranTerbayar = mAngsuran.reduce((sum, a) => sum + (a.jumlahBayar || 0), 0);
+    const ratio = totalS > 0 ? Number((propNominal / totalS).toFixed(2)) : 99;
+    const bungaP = setup.bungaPinjamanPersen || 1.5;
+    const angsuranPerBulan = Math.round(propNominal / (propTenor || 1)) + Math.round((propNominal * bungaP) / 100);
+
+    return {
+      simpananPokok: sPokok,
+      simpananWajib: sWajib,
+      simpananSukarela: sSukarela,
+      totalSimpanan: totalS,
+      jumlahBulanSimpananWajib: mSimpanan.filter(s => s.jenis === 'Wajib').length,
+      riwayatPinjamanCount: mPinjaman.length,
+      pinjamanLunasCount: lunasLoans.length,
+      pinjamanAktifCount: activeLoanObj ? 1 : 0,
+      sisaHutangPinjamanAktif: sisaHutangAktif,
+      riwayatAngsuranCount: mAngsuran.length,
+      totalAngsuranTerbayar,
+      hasActiveLoan: !!activeLoanObj,
+      sisaHutangWarung,
+      rasioPinjamanKeSimpanan: ratio,
+      angsuranPerBulan
+    };
+  };
+
+  // Rekomendasi nominal pinjaman ideal dan maksimal berdasarkan data anggota
+  const selectedMemberRec = useMemo(() => {
+    if (!anggotaId) return null;
+    const m = members.find(item => item.id === anggotaId);
+    if (!m) return null;
+
+    const currentNom = parseFloat(nominalStr.replace(/\D/g, '')) || 1000000;
+    const summary = getMemberFinancialSummary(anggotaId, currentNom, tenor || 10);
+    const totalSimpanan = summary.totalSimpanan || 0;
+    const hasActiveLoan = summary.hasActiveLoan;
+    const lunasCount = summary.pinjamanLunasCount;
+
+    let idealNominal = 0;
+    let maxNominal = 0;
+    let statusKelayakan: 'SANGAT_LAYAK' | 'LAYAK' | 'PERLU_PENYESUAIAN' | 'TIDAK_LAYAK' = 'LAYAK';
+    let catatanRekomendasi = '';
+
+    if (hasActiveLoan) {
+      statusKelayakan = 'TIDAK_LAYAK';
+      idealNominal = 0;
+      maxNominal = 0;
+      catatanRekomendasi = 'Anggota masih memiliki akad pinjaman berjalan yang belum lunas. Sesuai ketentuan, pinjaman aktif wajib diselesaikan terlebih dahulu sebelum membuka pinjaman baru.';
+    } else if (totalSimpanan <= 0) {
+      statusKelayakan = 'TIDAK_LAYAK';
+      idealNominal = 0;
+      maxNominal = 0;
+      catatanRekomendasi = 'Anggota belum memiliki saldo simpanan pokok dan simpanan wajib aktif sebagai modal jaminan di koperasi.';
+    } else {
+      // Rasio Ideal: 2.0x (baru) atau 2.5x (pernah lunas tertib)
+      const idealMultiplier = lunasCount > 0 ? 2.5 : 2.0;
+      idealNominal = Math.max(500000, Math.round((totalSimpanan * idealMultiplier) / 100000) * 100000);
+
+      // Rasio Maksimal: 3.0x simpanan dikurangi sisa hutang warung jika ada
+      const rawMax = Math.round((totalSimpanan * 3.0 - (summary.sisaHutangWarung || 0)) / 100000) * 100000;
+      maxNominal = Math.max(idealNominal, rawMax);
+
+      if (lunasCount > 0 && summary.sisaHutangWarung === 0) {
+        statusKelayakan = 'SANGAT_LAYAK';
+        catatanRekomendasi = `Anggota teladan dengan ${lunasCount}x riwayat pinjaman lunas tertib tanpa tunggakan kasbon toko. Sangat direkomendasikan hingga plafon maksimal ${formatRupiah(maxNominal)}.`;
+      } else if (summary.sisaHutangWarung > 0) {
+        statusKelayakan = 'PERLU_PENYESUAIAN';
+        catatanRekomendasi = `Terdapat catatan kasbon warung ${formatRupiah(summary.sisaHutangWarung)}. Plafon maksimal telah disesuaikan agar tidak membebani kapasitas cicilan anggota.`;
+      } else {
+        statusKelayakan = 'LAYAK';
+        catatanRekomendasi = `Kredit pertama. Direkomendasikan plafon ideal ${formatRupiah(idealNominal)} (2.0x simpanan) dengan batas atas aman ${formatRupiah(maxNominal)} (3.0x simpanan).`;
+      }
+    }
+
+    let skor = 0;
+    if (totalSimpanan > 0) skor += 40;
+    if (summary.jumlahBulanSimpananWajib >= 3) skor += 15;
+    if (!hasActiveLoan) skor += 25;
+    if (lunasCount > 0) skor += 15;
+    if (summary.sisaHutangWarung === 0) skor += 5;
+
+    return {
+      member: m,
+      summary,
+      totalSimpanan,
+      hasActiveLoan,
+      lunasCount,
+      idealNominal,
+      maxNominal,
+      statusKelayakan,
+      catatanRekomendasi,
+      skorKelayakan: skor,
+      sisaHutangWarung: summary.sisaHutangWarung
+    };
+  }, [anggotaId, members, nominalStr, tenor, simpanan, pinjaman, angsuran, piutangWarung, setup]);
+
+  const handleActionWithNotes = (id: string, type: 'APPROVE' | 'PARTIAL' | 'REJECT', customInitialNominal?: number, defaultNote?: string) => {
     setActionModal({ id, type });
-    setCatatanPengurusForm('');
+    setCatatanPengurusForm(defaultNote || '');
     const prop = pengajuanPinjaman.find(p => p.id === id);
-    if (prop && type === 'APPROVE') {
-      setApprovedNominalStr(new Intl.NumberFormat('id-ID').format(prop.nominalPinjaman));
+    if (prop) {
+      if (type === 'APPROVE') {
+        setApprovedNominalStr(new Intl.NumberFormat('id-ID').format(prop.nominalPinjaman));
+      } else if (type === 'PARTIAL') {
+        const initNom = customInitialNominal && customInitialNominal < prop.nominalPinjaman
+          ? customInitialNominal
+          : prop.aiRecommendation?.suggestedNominal && prop.aiRecommendation.suggestedNominal < prop.nominalPinjaman
+          ? prop.aiRecommendation.suggestedNominal
+          : Math.round((prop.nominalPinjaman * 0.6) / 100000) * 100000;
+        setApprovedNominalStr(new Intl.NumberFormat('id-ID').format(initNom));
+        if (!defaultNote) {
+          setCatatanPengurusForm(`Disetujui sebagian sebesar ${formatRupiah(initNom)} dengan pertimbangan batas simpanan anggota dan riwayat transaksi.`);
+        }
+      } else {
+        setApprovedNominalStr('');
+      }
     } else {
       setApprovedNominalStr('');
     }
@@ -3282,22 +4115,44 @@ export function PinjamanView({
 
   const handleActionSubmit = () => {
     if (!actionModal) return;
+    const prop = pengajuanPinjaman.find(p => p.id === actionModal.id);
+    if (!prop) return;
+
     if (actionModal.type === 'APPROVE') {
-      const prop = pengajuanPinjaman.find(p => p.id === actionModal.id);
-      if (prop) {
-        const cleanNum = parseFloat(approvedNominalStr.replace(/\D/g, ''));
-        const approvedNominal = isNaN(cleanNum) || cleanNum <= 0 ? prop.nominalPinjaman : cleanNum;
-        const provisiRate = prop.biayaProvisiPersen || setup.biayaProvisiPersen || 0;
-        const provisiDipotong = approvedNominal * (provisiRate / 100);
-        const diterima = approvedNominal - provisiDipotong;
+      const cleanNum = parseFloat(approvedNominalStr.replace(/\D/g, ''));
+      const approvedNominal = isNaN(cleanNum) || cleanNum <= 0 ? prop.nominalPinjaman : cleanNum;
+      const provisiRate = prop.biayaProvisiPersen || setup.biayaProvisiPersen || 0;
+      const provisiDipotong = approvedNominal * (provisiRate / 100);
+      const diterima = approvedNominal - provisiDipotong;
 
-        if (diterima > availableCash) {
-          alert(`Transaksi Ditolak: Saldo Kas Koperasi tidak mencukupi untuk pencairan pinjaman ini!\nKas Koperasi yang tersedia saat ini: ${formatRupiah(availableCash)}\nNominal pencairan (net): ${formatRupiah(diterima)}`);
-          return;
-        }
-
-        onApprovePengajuanPinjaman(actionModal.id, catatanPengurusForm, isNaN(cleanNum) || cleanNum <= 0 ? undefined : cleanNum);
+      if (diterima > availableCash) {
+        alert(`Transaksi Ditolak: Saldo Kas Koperasi tidak mencukupi untuk pencairan pinjaman ini!\nKas Koperasi yang tersedia saat ini: ${formatRupiah(availableCash)}\nNominal pencairan (net): ${formatRupiah(diterima)}`);
+        return;
       }
+
+      onApprovePengajuanPinjaman(actionModal.id, catatanPengurusForm, approvedNominal, false);
+    } else if (actionModal.type === 'PARTIAL') {
+      const cleanNum = parseFloat(approvedNominalStr.replace(/\D/g, ''));
+      if (isNaN(cleanNum) || cleanNum <= 0) {
+        alert('Nominal yang disetujui sebagian harus lebih besar dari Rp 0.');
+        return;
+      }
+      if (cleanNum >= prop.nominalPinjaman) {
+        alert(`Nominal disetujui sebagian (${formatRupiah(cleanNum)}) harus lebih kecil dari nominal yang diajukan (${formatRupiah(prop.nominalPinjaman)}).\n\nJika ingin menyetujui seluruhnya, silakan gunakan tombol 'Setujui Penuh'.`);
+        return;
+      }
+
+      const provisiRate = prop.biayaProvisiPersen || setup.biayaProvisiPersen || 0;
+      const provisiDipotong = cleanNum * (provisiRate / 100);
+      const diterima = cleanNum - provisiDipotong;
+
+      if (diterima > availableCash) {
+        alert(`Transaksi Ditolak: Saldo Kas Koperasi tidak mencukupi untuk pencairan pinjaman ini!\nKas Koperasi yang tersedia saat ini: ${formatRupiah(availableCash)}\nNominal pencairan (net): ${formatRupiah(diterima)}`);
+        return;
+      }
+
+      const finalNotes = catatanPengurusForm.trim() || `Disetujui sebagian sebesar ${formatRupiah(cleanNum)} dari pengajuan awal ${formatRupiah(prop.nominalPengajuanAwal || prop.nominalPinjaman)}.`;
+      onApprovePengajuanPinjaman(actionModal.id, finalNotes, cleanNum, true);
     } else {
       onRejectPengajuanPinjaman(actionModal.id, catatanPengurusForm);
     }
@@ -3394,6 +4249,9 @@ export function PinjamanView({
     const sloganKoperasi = setup?.slogan || "Membantu Kesejahteraan Anggota";
 
     const nominalTerbilang = terbilang(p.nominalPinjaman) + " Rupiah";
+    const repays = angsuran.filter(a => a.pinjamanId === p.id);
+    const isLunas = p.status === 'Lunas' || calculateLoanOutstanding(p, repays) <= 0;
+    const currentStatus = isLunas ? 'LUNAS' : (p.status || 'BELUM LUNAS');
 
     printWindow.document.write(`
       <html>
@@ -3499,64 +4357,71 @@ export function PinjamanView({
         <body onload="window.print(); window.close();">
           <div class="contract-container">
             <div class="header">
-              \${setup?.logoUrl && setup.logoUrl.startsWith('data:image') 
-                ? \`<img src="\${setup.logoUrl}" style="max-height: 50px; max-width: 50px; margin-bottom: 6px; border-radius: 50%; object-fit: cover; vertical-align: middle;" />\` 
-                : \`<span style="font-size: 24px; display: block; margin-bottom: 4px;">\${setup?.logoUrl || '🌱'}</span>\`
+              ${setup?.logoUrl && setup.logoUrl.startsWith('data:image') 
+                ? `<img src="${setup.logoUrl}" style="max-height: 50px; max-width: 50px; margin-bottom: 6px; border-radius: 50%; object-fit: cover; vertical-align: middle;" />` 
+                : `<span style="font-size: 24px; display: block; margin-bottom: 4px;">${setup?.logoUrl || '🌱'}</span>`
               }
-              <h2>\${koperasiName.toUpperCase()}</h2>
-              <p>\${sloganKoperasi}</p>
-              <p>\${alamatKoperasi}</p>
-              <p>\${statusBadanHukum}</p>
+              <h2>${koperasiName.toUpperCase()}</h2>
+              <p>${sloganKoperasi}</p>
+              <p>${alamatKoperasi}</p>
+              <p>${statusBadanHukum}</p>
             </div>
             
             <div class="title">Surat Akad Perjanjian Kredit Pinjaman</div>
             
             <div class="meta-section">
-              <div class="meta-row"><span>No. Kontrak:</span> <b>\${p.id}</b></div>
-              <div class="meta-row"><span>Waktu Realisasi:</span> <b>\${p.tanggal} / \${getTransactionTime(p.id)}</b></div>
-              <div class="meta-row"><span>No. Anggota:</span> <b>\${member.noAnggota}</b></div>
-              <div class="meta-row"><span>Nama Penerima:</span> <b>\${member.nama}</b></div>
-              <div class="meta-row"><span>No. HP / Alamat:</span> <b>\${member.noHp} / \${member.alamat || '-'}</b></div>
+              <div class="meta-row"><span>No. Kontrak:</span> <b>${p.id}</b></div>
+              <div class="meta-row"><span>Waktu Realisasi:</span> <b>${p.tanggal} / ${getTransactionTime(p.id)}</b></div>
+              <div class="meta-row"><span>No. Anggota:</span> <b>${member.noAnggota}</b></div>
+              <div class="meta-row"><span>Nama Penerima:</span> <b>${member.nama}</b></div>
+              <div class="meta-row"><span>No. HP / Alamat:</span> <b>${member.noHp} / ${member.alamat || '-'}</b></div>
             </div>
             
             <div class="details-section">
-              <div class="detail-row bold"><span>Plafond Pengajuan:</span> <span>\${formatRupiah(p.nominalPinjaman)}</span></div>
-              <div class="detail-row"><span>Biaya Provisi (\${p.biayaProvisiPersen || setup.biayaProvisiPersen || 0}%):</span> <span style="color: #666;">-\${formatRupiah(p.provisiDipotong)}</span></div>
-              <div class="detail-row bold" style="color: #059669;"><span>Plafond Bersih Diterima:</span> <span>\${formatRupiah(p.jumlahDiterima)}</span></div>
+              <div class="detail-row bold"><span>Plafond Pengajuan:</span> <span>${formatRupiah(p.nominalPinjaman)}</span></div>
+              <div class="detail-row"><span>Biaya Provisi (${p.biayaProvisiPersen || setup?.biayaProvisiPersen || 0}%):</span> <span style="color: #666;">-${formatRupiah(p.provisiDipotong)}</span></div>
+              <div class="detail-row bold" style="color: #059669;"><span>Plafond Bersih Diterima:</span> <span>${formatRupiah(p.jumlahDiterima)}</span></div>
               
               <div style="margin: 6px 0; border-top: 1px dotted #000;"></div>
               
-              <div class="detail-row"><span>Jangka Waktu (Tenor):</span> <span>\${p.tenor} Bulan</span></div>
-              <div class="detail-row"><span>Suku Jasa Koperasi:</span> <span>\${p.bungaFlatPersen}% per Bulan</span></div>
-              <div class="detail-row"><span>Metode Perhitungan Jasa:</span> <span>\${setup.jenisBungaPinjaman === 'menurun' ? 'Menurun (Efektif)' : 'Tetap (Flat)'}</span></div>
+              <div class="detail-row"><span>Jangka Waktu (Tenor):</span> <span>${p.tenor} Bulan</span></div>
+              <div class="detail-row"><span>Suku Jasa Koperasi:</span> <span>${p.bungaFlatPersen}% per Bulan</span></div>
+              <div class="detail-row"><span>Metode Perhitungan Jasa:</span> <span>${setup?.jenisBungaPinjaman === 'menurun' ? 'Menurun (Efektif)' : 'Tetap (Flat)'}</span></div>
               
               <div style="margin: 6px 0; border-top: 1px dotted #000;"></div>
               
-              <div class="detail-row"><span>Angsuran Pokok / bln:</span> <span>\${formatRupiah(p.angsuranPokokPerBulan)}</span></div>
-              <div class="detail-row"><span>Jasa Koperasi / bln (rata-rata):</span> <span>\${formatRupiah(p.jasaPerBulan)}</span></div>
-              <div class="detail-row bold" style="font-size: 11px;"><span>Angsuran Bulanan:</span> <span>\${formatRupiah(p.totalAngsuranPerBulan)} / Bulan</span></div>
-              <div class="detail-row bold"><span>Total Kewajiban Pelunasan:</span> <span>\${formatRupiah(p.totalWajibBayar)}</span></div>
-              <div class="detail-row"><span>Status Pembayaran Saat Ini:</span> <span style="text-transform: uppercase; font-weight: bold;">\${p.status}</span></div>
+              <div class="detail-row"><span>Angsuran Pokok / bln:</span> <span>${formatRupiah(p.angsuranPokokPerBulan)}</span></div>
+              <div class="detail-row"><span>Jasa Koperasi / bln (rata-rata):</span> <span>${formatRupiah(p.jasaPerBulan)}</span></div>
+              <div class="detail-row bold" style="font-size: 11px;"><span>Angsuran Bulanan:</span> <span>${formatRupiah(p.totalAngsuranPerBulan)} / Bulan</span></div>
+              <div class="detail-row bold"><span>Total Kewajiban Pelunasan:</span> <span>${formatRupiah(p.totalWajibBayar)}</span></div>
+              <div class="detail-row"><span>Status Pembayaran Saat Ini:</span> <span style="text-transform: uppercase; font-weight: bold;">${currentStatus}</span></div>
             </div>
             
             <div class="terbilang-section">
-              Terbilang (Plafond Pengajuan): "\${nominalTerbilang}"
+              Terbilang (Plafond Pengajuan): "${nominalTerbilang}"
             </div>
             
             <p style="font-size: 7.5px; text-align: justify; color: #333; line-height: 1.3; margin: 10px 0;">
               Surat Akad Kredit elektronik ini bersifat mengikat dan sah secara hukum antara pihak Koperasi dengan Anggota yang bersangkutan. Anggota berkewajiban melakukan pembayaran setoran angsuran setiap bulan sebelum tanggal jatuh tempo yang disepakati sesuai dengan ketentuan AD/ART Koperasi.
             </p>
             
-            <div class="signatures">
-              <div class="sig-col">
-                <p>Penerima Manfaat / Anggota</p>
-                <div class="sig-space"></div>
-                <p><b>( \${member.nama} )</b></p>
+            <div class="signatures" style="margin-top: 20px; display: flex; flex-direction: column; gap: 15px;">
+              <div style="display: flex; justify-content: space-between; gap: 20px;">
+                <div class="sig-col" style="flex: 1; text-align: center;">
+                  <p style="font-size: 8.5px; font-weight: bold; margin-bottom: 35px;">Peminjam / Anggota,</p>
+                  <p style="font-size: 8.5px;"><b>( ${member.nama} )</b></p>
+                  <p style="font-size: 7.5px; color: #666;">No. Anggota: ${member.noAnggota || '-'}</p>
+                </div>
+                <div class="sig-col" style="flex: 1; text-align: center;">
+                  <p style="font-size: 8.5px; font-weight: bold; margin-bottom: 35px;">Bendahara Koperasi,</p>
+                  <p style="font-size: 8.5px;"><b>( ${namaBendahara} )</b></p>
+                  <p style="font-size: 7.5px; color: #666;">Pengurus Koperasi</p>
+                </div>
               </div>
-              <div class="sig-col">
-                <p>Pengurus Koperasi</p>
-                <div class="sig-space"></div>
-                <p><b>( Ketua / Kasir Koperasi )</b></p>
+              <div style="text-align: center; margin-top: 5px;">
+                <p style="font-size: 8.5px; font-weight: bold; margin-bottom: 35px;">Disetujui Oleh:<br/>Ketua Koperasi,</p>
+                <p style="font-size: 8.5px;"><b>( ${namaKetua} )</b></p>
+                <p style="font-size: 7.5px; color: #666;">Pimpinan Koperasi</p>
               </div>
             </div>
           </div>
@@ -3571,7 +4436,7 @@ export function PinjamanView({
     const nominal = parseFloat(nominalStr.replace(/\D/g, ''));
     if (isNaN(nominal) || nominal <= 0) return null;
 
-    const provisiRate = setup.biayaProvisiPersen ?? 1.0;
+    const provisiRate = isDipotongProvisi ? (setup.biayaProvisiPersen ?? 1.0) : 0;
     const provisiDipotong = nominal * (provisiRate / 100);
     const jumlahDiterima = nominal - provisiDipotong;
     const angsuranPokokPerBulan = nominal / tenor;
@@ -3625,7 +4490,7 @@ export function PinjamanView({
       amortizationSchedule,
       isMenurun
     };
-  }, [nominalStr, tenor, bungaFlat, setup]);
+  }, [nominalStr, tenor, bungaFlat, setup, isDipotongProvisi]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -3683,17 +4548,206 @@ export function PinjamanView({
         <form onSubmit={handleSubmit} className="space-y-4 text-sm">
           <div className="space-y-1">
             <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 label-id">Penerima Manfaat Pinjaman</label>
-            <select 
-              value={anggotaId} 
-              onChange={(e) => setAnggotaId(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-bold"
-              required
-            >
-              <option value="">-- Cari Nama / ID Anggota --</option>
-              {members.map(m => (
-                <option key={m.id} value={m.id}>{m.noAnggota} - {m.nama}</option>
-              ))}
-            </select>
+            <div className="space-y-1.5">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Ketik untuk filter listbox ID / Nama Anggota..."
+                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium"
+                  value={formMemberSearch}
+                  onChange={(e) => setFormMemberSearch(e.target.value)}
+                />
+              </div>
+              <select 
+                value={anggotaId} 
+                onChange={(e) => setAnggotaId(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-bold"
+                required
+              >
+                <option value="">-- Pilih Anggota ({formFilteredMembers.length}) --</option>
+                {formFilteredMembers.map(m => (
+                  <option key={m.id} value={m.id}>{m.nama} ({m.noAnggota})</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Tombol Cek Rekomendasi tepat di bawah nama anggota */}
+            <div className="pt-1">
+              <button
+                type="button"
+                id="btn-cek-rekomendasi"
+                onClick={() => {
+                  if (!anggotaId) {
+                    alert('Silakan pilih anggota terlebih dahulu pada listbox di atas untuk memeriksa rekomendasi pinjaman.');
+                    return;
+                  }
+                  setShowLoanRecommendation(prev => !prev);
+                }}
+                className={`w-full py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs border ${
+                  showLoanRecommendation && selectedMemberRec
+                    ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700'
+                    : 'bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-700 hover:to-indigo-700 text-white border-transparent'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
+                <span>{showLoanRecommendation && selectedMemberRec ? 'Tutup Panel Rekomendasi' : 'Cek Rekomendasi Pinjaman'}</span>
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showLoanRecommendation && selectedMemberRec ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
+
+            {/* Panel Tampilan Rekomendasi Nominal Pinjaman Ideal & Maksimal */}
+            {showLoanRecommendation && selectedMemberRec && (
+              <div className="mt-2 p-3.5 bg-gradient-to-br from-slate-50 to-indigo-50/50 dark:from-slate-900 dark:to-indigo-950/30 border-2 border-indigo-200 dark:border-indigo-800/80 rounded-2xl shadow-xs space-y-3">
+                {/* Header info */}
+                <div className="flex items-center justify-between border-b border-indigo-100 dark:border-indigo-900/50 pb-2">
+                  <div className="flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                    <span className="font-extrabold text-xs text-slate-850 dark:text-slate-100">
+                      Rekomendasi: {selectedMemberRec.member.nama}
+                    </span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    selectedMemberRec.skorKelayakan >= 80 
+                      ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border border-emerald-300'
+                      : selectedMemberRec.skorKelayakan >= 60
+                      ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border border-amber-300'
+                      : 'bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-200 border border-rose-300'
+                  }`}>
+                    Skor: {selectedMemberRec.skorKelayakan}/100
+                  </span>
+                </div>
+
+                {/* Dua Kotak Rekomendasi: Ideal & Maksimal */}
+                <div className="grid grid-cols-2 gap-2">
+                  {/* Rekomendasi Ideal */}
+                  <div className="p-2.5 bg-white dark:bg-slate-850 border border-emerald-200 dark:border-emerald-800/60 rounded-xl space-y-1 relative overflow-hidden flex flex-col justify-between">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          Pinjaman Ideal
+                        </span>
+                        <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.2 rounded">
+                          {selectedMemberRec.lunasCount > 0 ? '2.5x' : '2.0x'} Simpanan
+                        </span>
+                      </div>
+                      <p className="text-sm font-black font-mono text-emerald-700 dark:text-emerald-300">
+                        {formatRupiah(selectedMemberRec.idealNominal)}
+                      </p>
+                      <p className="text-[9.5px] text-slate-500 leading-tight">
+                        Rasio aman, cicilan bulanan ringan & terjaga.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={selectedMemberRec.idealNominal <= 0}
+                      onClick={() => {
+                        setNominalStr(new Intl.NumberFormat('id-ID').format(selectedMemberRec.idealNominal));
+                      }}
+                      className="w-full mt-1.5 py-1 px-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-[10px] font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1 shadow-2xs"
+                    >
+                      <CheckCircle2 className="w-3 h-3" />
+                      <span>Terapkan Ideal</span>
+                    </button>
+                  </div>
+
+                  {/* Rekomendasi Maksimal */}
+                  <div className="p-2.5 bg-white dark:bg-slate-850 border border-indigo-200 dark:border-indigo-800/60 rounded-xl space-y-1 relative overflow-hidden flex flex-col justify-between">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-700 dark:text-indigo-400 flex items-center gap-1">
+                          <TrendingUp className="w-3 h-3 text-indigo-600" />
+                          Pinjaman Maksimal
+                        </span>
+                        <span className="text-[9px] font-bold text-indigo-600 bg-indigo-50 dark:bg-indigo-950/60 px-1.5 py-0.2 rounded">
+                          Batas 3.0x
+                        </span>
+                      </div>
+                      <p className="text-sm font-black font-mono text-indigo-700 dark:text-indigo-300">
+                        {formatRupiah(selectedMemberRec.maxNominal)}
+                      </p>
+                      <p className="text-[9.5px] text-slate-500 leading-tight">
+                        Batas plafon kredit tertinggi yang aman di koperasi.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={selectedMemberRec.maxNominal <= 0}
+                      onClick={() => {
+                        setNominalStr(new Intl.NumberFormat('id-ID').format(selectedMemberRec.maxNominal));
+                      }}
+                      className="w-full mt-1.5 py-1 px-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-[10px] font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1 shadow-2xs"
+                    >
+                      <TrendingUp className="w-3 h-3" />
+                      <span>Terapkan Maksimal</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Ringkasan Parameter Finansial Anggota */}
+                <div className="p-2.5 bg-white/80 dark:bg-slate-900/70 rounded-xl border border-slate-200 dark:border-slate-800 text-[10.5px] space-y-1 text-slate-650 dark:text-slate-350">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500">Total Simpanan Anggota:</span>
+                    <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
+                      {formatRupiah(selectedMemberRec.totalSimpanan)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center text-[9.5px] text-slate-400 pl-2">
+                    <span>(Pokok: {formatRupiah(selectedMemberRec.summary.simpananPokok)} • Wajib: {formatRupiah(selectedMemberRec.summary.simpananWajib)} • Sukarela: {formatRupiah(selectedMemberRec.summary.simpananSukarela)})</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500">Riwayat Kredit:</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      {selectedMemberRec.hasActiveLoan 
+                        ? '⚠️ Memiliki Pinjaman Berjalan' 
+                        : selectedMemberRec.lunasCount > 0 
+                        ? `✅ ${selectedMemberRec.lunasCount}x Pinjaman Lunas Tertib` 
+                        : 'Kredit Pertama (Baru)'}
+                    </span>
+                  </div>
+                  {selectedMemberRec.sisaHutangWarung > 0 && (
+                    <div className="flex justify-between items-center text-amber-600 dark:text-amber-400">
+                      <span>Tanggungan Kasbon Warung:</span>
+                      <span className="font-mono font-bold">{formatRupiah(selectedMemberRec.sisaHutangWarung)}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Catatan Kebijakan Rekomendasi */}
+                <p className="text-[10px] text-slate-650 dark:text-slate-400 leading-relaxed italic bg-indigo-50/60 dark:bg-indigo-950/40 p-2 rounded-lg border border-indigo-100 dark:border-indigo-900/40">
+                  💡 {selectedMemberRec.catatanRekomendasi}
+                </p>
+
+                {/* Tombol Buka Analisis AI Lengkap */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const cleanNom = parseFloat(nominalStr.replace(/\D/g, '')) || selectedMemberRec.idealNominal || 1000000;
+                    const syntheticProp: PengajuanPinjaman = {
+                      id: `SIM-${selectedMemberRec.member.id.substring(0, 6)}`,
+                      anggotaId: selectedMemberRec.member.id,
+                      nominalPinjaman: cleanNom,
+                      tenor: tenor || 10,
+                      bungaFlatPersen: bungaFlat,
+                      biayaProvisiPersen: setup.biayaProvisiPersen ?? 1,
+                      provisiDipotong: (cleanNom * (setup.biayaProvisiPersen ?? 1)) / 100,
+                      jumlahDiterima: cleanNom * (1 - (setup.biayaProvisiPersen ?? 1) / 100),
+                      alasanPengajuan: 'Pencairan Kontrak Baru oleh Pengurus',
+                      tanggalPengajuan: pDate,
+                      status: 'Pending'
+                    };
+                    setAiModalProposal(syntheticProp);
+                  }}
+                  className="w-full py-1.5 px-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs"
+                >
+                  <Bot className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Buka Analisis Pakar AI Lengkap</span>
+                </button>
+              </div>
+            )}
             {activeLoan && (
               <div className="p-3 bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-400 text-xs rounded-xl flex items-start gap-2 mt-2">
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -3767,14 +4821,23 @@ export function PinjamanView({
                 onChange={(e) => setTenor(parseInt(e.target.value) || 1)}
                 className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 font-bold"
               >
-                <option value={3}>3 Bulan</option>
-                <option value={6}>6 Bulan</option>
-                <option value={10}>10 Bulan</option>
-                <option value={12}>12 Bulan</option>
-                <option value={18}>18 Bulan</option>
-                <option value={24}>24 Bulan</option>
+                {Array.from({ length: 20 }, (_, i) => i + 1).map((m) => (
+                  <option key={m} value={m}>{m} Bulan</option>
+                ))}
               </select>
             </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 label-id font-bold text-slate-700 dark:text-slate-300">Skema Potongan Provisi</label>
+            <select
+              value={isDipotongProvisi ? 'ya' : 'tidak'}
+              onChange={(e) => setIsDipotongProvisi(e.target.value === 'ya')}
+              className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-bold text-xs"
+            >
+              <option value="ya">Dipotong Provisi ({setup.biayaProvisiPersen ?? 1}%)</option>
+              <option value="tidak">Tanpa Potongan Provisi (0%)</option>
+            </select>
           </div>
 
           {/* Simulator Calculations preview Box */}
@@ -3866,115 +4929,465 @@ export function PinjamanView({
               </h3>
             </div>
             
-            <div className="flex bg-slate-100 dark:bg-slate-900 p-1 rounded-lg self-start sm:self-auto text-xs">
-              <button
-                type="button"
-                onClick={() => setAdminSubTab('kontrak')}
-                className={`px-3 py-1.5 rounded-md font-semibold transition cursor-pointer ${
-                  adminSubTab === 'kontrak'
-                    ? 'bg-white dark:bg-slate-850 shadow-sm text-slate-850 dark:text-slate-100'
-                    : 'text-slate-500 hover:text-slate-750 dark:text-slate-400'
-                }`}
-              >
-                Akad Berjalan ({pinjaman.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setAdminSubTab('pengajuan')}
-                className={`px-3 py-1.5 rounded-md font-semibold transition cursor-pointer relative ${
-                  adminSubTab === 'pengajuan'
-                    ? 'bg-white dark:bg-slate-855 shadow-sm text-slate-850 dark:text-slate-100'
-                    : 'text-slate-500 hover:text-slate-750 dark:text-slate-400'
-                }`}
-              >
-                Pengajuan Anggota
-                {pengajuanPinjaman.filter(p => p.status === 'Pending').length > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-rose-600 text-white text-[9px] font-bold h-4 w-4 rounded-full flex items-center justify-center animate-pulse">
-                    {pengajuanPinjaman.filter(p => p.status === 'Pending').length}
-                  </span>
-                )}
-              </button>
+            <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                <input 
+                  type="text"
+                  placeholder="Cari Nama / ID Anggota / Kontrak..."
+                  className="pl-8 pr-3 py-1 text-xs border rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 outline-none w-36 sm:w-44 focus:border-emerald-500 font-medium"
+                  value={tableSearchTerm}
+                  onChange={(e) => setTableSearchTerm(e.target.value)}
+                />
+              </div>
+
+              {adminSubTab === 'kontrak' && (
+                <>
+                  {/* Filter Bulan Akad Kredit */}
+                  <select
+                    id="filter-bulan-pinjaman"
+                    value={selectedMonthFilter}
+                    onChange={(e) => setSelectedMonthFilter(e.target.value)}
+                    className="px-2 py-1 text-xs border rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 font-bold cursor-pointer"
+                    title="Filter Transaksi Akad Kredit per Bulan"
+                  >
+                    <option value="semua">🗓️ Semua Bulan</option>
+                    {availableLoanMonths.map(ym => {
+                      const count = pinjaman.filter(p => p.tanggal && p.tanggal.startsWith(ym)).length;
+                      return (
+                        <option key={ym} value={ym}>
+                          {formatYearMonthIndo(ym)} ({count} akad)
+                        </option>
+                      );
+                    })}
+                  </select>
+
+                  {/* Reset bulan button if active */}
+                  {selectedMonthFilter !== 'semua' && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMonthFilter('semua')}
+                      className="px-2 py-1 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 text-[10px] font-bold rounded-lg border border-amber-200 dark:border-amber-800 flex items-center gap-1 transition cursor-pointer"
+                      title="Reset filter bulan ke semua bulan"
+                    >
+                      <span>✕ Reset</span>
+                    </button>
+                  )}
+
+                  <select
+                    value={filterStatus}
+                    onChange={(e) => setFilterStatus(e.target.value)}
+                    className="px-2 py-1 text-xs border rounded-lg bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 font-bold"
+                  >
+                    <option value="">Semua Status</option>
+                    <option value="Belum Lunas">Belum Lunas</option>
+                    <option value="Lunas">Lunas</option>
+                  </select>
+
+                  {/* Toggle Tampilan: Tabel vs Rekap Per Bulan */}
+                  <div className="flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg text-xs border border-slate-200 dark:border-slate-700">
+                    <button
+                      type="button"
+                      onClick={() => setLoanViewMode('table')}
+                      className={`px-2 py-1 rounded text-[11px] font-bold transition cursor-pointer ${
+                        loanViewMode === 'table'
+                          ? 'bg-white dark:bg-slate-800 shadow-2xs text-emerald-700 dark:text-emerald-400 font-extrabold'
+                          : 'text-slate-500 hover:text-slate-750 dark:text-slate-400'
+                      }`}
+                      title="Tampilan Tabel Standar"
+                    >
+                      Tabel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLoanViewMode('grouped_month')}
+                      className={`px-2 py-1 rounded text-[11px] font-bold transition cursor-pointer flex items-center gap-1 ${
+                        loanViewMode === 'grouped_month'
+                          ? 'bg-white dark:bg-slate-800 shadow-2xs text-emerald-700 dark:text-emerald-400 font-extrabold'
+                          : 'text-slate-500 hover:text-slate-750 dark:text-slate-400'
+                      }`}
+                      title="Tampilan Dikelompokkan Per Bulan"
+                    >
+                      <Calendar className="w-3 h-3 text-emerald-600" />
+                      <span>Per Bulan</span>
+                    </button>
+                  </div>
+
+                  {/* Export Excel Akad Kredit */}
+                  <button
+                    type="button"
+                    onClick={handleExportLoanContractsExcel}
+                    className="p-1.5 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1"
+                    title="Download Excel Rekap Transaksi Akad Kredit"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span className="hidden xl:inline text-[10px]">Excel</span>
+                  </button>
+                </>
+              )}
+
+              <div className="flex bg-slate-100 dark:bg-slate-900 p-1 rounded-lg text-xs">
+                <button
+                  type="button"
+                  onClick={() => setAdminSubTab('kontrak')}
+                  className={`px-3 py-1.5 rounded-md font-semibold transition cursor-pointer ${
+                    adminSubTab === 'kontrak'
+                      ? 'bg-white dark:bg-slate-850 shadow-sm text-slate-850 dark:text-slate-100'
+                      : 'text-slate-500 hover:text-slate-750 dark:text-slate-400'
+                  }`}
+                >
+                  Akad Berjalan ({filteredPinjaman.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdminSubTab('pengajuan')}
+                  className={`px-3 py-1.5 rounded-md font-semibold transition cursor-pointer relative ${
+                    adminSubTab === 'pengajuan'
+                      ? 'bg-white dark:bg-slate-855 shadow-sm text-slate-850 dark:text-slate-100'
+                      : 'text-slate-500 hover:text-slate-750 dark:text-slate-400'
+                  }`}
+                >
+                  Pengajuan Anggota ({filteredPengajuan.length})
+                  {pengajuanPinjaman.filter(p => p.status === 'Pending').length > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-rose-600 text-white text-[9px] font-bold h-4 w-4 rounded-full flex items-center justify-center animate-pulse">
+                      {pengajuanPinjaman.filter(p => p.status === 'Pending').length}
+                    </span>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
+
+          {/* Monthly / Filter Metric Bar */}
+          {adminSubTab === 'kontrak' && (
+            <div className="mb-3.5 p-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl border border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 flex items-center justify-center font-bold">
+                  <Calendar className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400 tracking-wider">
+                      Periode Transaksi Akad Kredit
+                    </span>
+                    {selectedMonthFilter !== 'semua' && (
+                      <span className="px-1.5 py-0.5 bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 text-[9px] font-bold rounded-full">
+                        Filter Aktif
+                      </span>
+                    )}
+                  </div>
+                  <p className="font-extrabold text-slate-800 dark:text-slate-100 font-sans text-xs sm:text-sm">
+                    {selectedMonthFilter === 'semua' ? 'Semua Bulan (Kumulatif)' : formatYearMonthIndo(selectedMonthFilter)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 sm:gap-4 flex-wrap text-right font-mono">
+                <div>
+                  <p className="text-[9px] uppercase font-bold text-slate-400">Total Akad</p>
+                  <p className="font-bold text-slate-800 dark:text-slate-200">{loanStats.count} <span className="text-[10px] font-normal text-slate-400 font-sans">akad</span></p>
+                </div>
+                <div>
+                  <p className="text-[9px] uppercase font-bold text-slate-400">Plafon Disetujui</p>
+                  <p className="font-bold text-slate-800 dark:text-slate-200">{formatRupiah(loanStats.totalPlafon)}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] uppercase font-bold text-emerald-600 dark:text-emerald-400">Disbursed (Cair)</p>
+                  <p className="font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah(loanStats.totalDisbursed)}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] uppercase font-bold text-slate-400">Tagihan / Bln</p>
+                  <p className="font-bold text-slate-800 dark:text-slate-200">{formatRupiah(loanStats.totalAngsuranBln)}</p>
+                </div>
+                <div className="hidden md:block border-l border-slate-200 dark:border-slate-700 pl-3">
+                  <p className="text-[9px] uppercase font-bold text-slate-400">Status</p>
+                  <p className="text-[11px] font-sans">
+                    <span className="text-emerald-600 font-bold">{loanStats.countLunas} Lunas</span> • <span className="text-rose-600 font-bold">{loanStats.countBelumLunas} Belum</span>
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
           
           {adminSubTab === 'kontrak' ? (
-            <div className="overflow-x-auto flex-1 max-h-[300px]">
-              <table className="w-full text-left text-sm text-slate-600 dark:text-slate-350">
-                <thead className="bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-400 uppercase sticky top-0 border-b border-slate-100 dark:border-slate-700">
-                  <tr>
-                    <th className="px-4 py-2.5">Arsip</th>
-                    <th className="px-4 py-2.5">Anggota</th>
-                    <th className="px-4 py-2.5">Nominal Disbursed</th>
-                    <th className="px-4 py-2.5">Tenor & Cicilan</th>
-                    <th className="px-4 py-2.5 text-center">Status</th>
-                    <th className="px-4 py-2.5 text-center w-20">Aksi</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-700 font-mono text-xs">
-                  {pinjaman.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-12 text-center text-slate-455 italic">Belum ada kontrak kredit tersimpan</td>
-                    </tr>
-                  ) : (
-                    pinjaman.map((p) => {
-                      const mInfo = members.find(m => m.id === p.anggotaId);
-                      return (
-                        <tr key={p.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
-                          <td className="px-4 py-2.5 whitespace-nowrap">
-                            <p className="font-bold">{p.tanggal}</p>
-                            <p className="text-[9px] text-slate-400">Provisi {p.biayaProvisiPersen}%: {formatRupiah(p.provisiDipotong)}</p>
-                          </td>
-                          <td className="px-4 py-2.5">
-                            <p className="font-sans font-semibold text-slate-800 dark:text-slate-200">{mInfo?.nama}</p>
-                            <p className="text-[10px] text-slate-400">{mInfo?.noAnggota}</p>
-                          </td>
-                          <td className="px-4 py-2.5">
-                            <p className="font-bold text-slate-800 dark:text-slate-100">{formatRupiah(p.nominalPinjaman)}</p>
-                            <p className="text-[9px] text-emerald-600">Disbursed: {formatRupiah(p.jumlahDiterima)}</p>
-                          </td>
-                          <td className="px-4 py-2.5 whitespace-nowrap">
-                            <p className="font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah(p.totalAngsuranPerBulan)}/bln</p>
-                            <p className="text-[9px] text-slate-400">Tenor: {p.tenor} Bulan | Jasa: {p.bungaFlatPersen}%</p>
-                          </td>
-                          <td className="px-4 py-2.5 text-center">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              p.status === 'Lunas' ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-900/20' : 'bg-rose-50 text-rose-800 dark:bg-rose-950/20'
-                            }`}>
-                              {p.status}
+            loanViewMode === 'grouped_month' ? (
+              /* Grouped by Month View */
+              <div className="space-y-4 overflow-y-auto flex-1 max-h-[460px] pr-1">
+                {loansGroupedByMonth.length === 0 ? (
+                  <div className="px-4 py-12 text-center text-slate-450 italic bg-slate-50 dark:bg-slate-900 rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
+                    Belum ada transaksi akad kredit pada periode ini.
+                  </div>
+                ) : (
+                  loansGroupedByMonth.map(group => (
+                    <div key={group.monthKey} className="bg-slate-50/60 dark:bg-slate-900/40 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-2xs">
+                      {/* Month Header Banner */}
+                      <div className="p-3 bg-slate-100 dark:bg-slate-850 border-b border-slate-200 dark:border-slate-750 flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="p-1.5 bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1">
+                            <Calendar className="w-3.5 h-3.5" />
+                          </span>
+                          <div>
+                            <h4 className="font-extrabold text-xs text-slate-800 dark:text-slate-100">
+                              {group.monthLabel}
+                            </h4>
+                            <span className="text-[10px] text-slate-500 dark:text-slate-400 font-sans">
+                              {group.loans.length} Transaksi Akad Kredit
                             </span>
-                          </td>
-                          <td className="px-4 py-2.5 text-center">
-                            <div className="flex items-center justify-center gap-1.5">
-                              <button
-                                onClick={() => handlePrintLoanContract(p)}
-                                className="p-1 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
-                                title="Cetak Akad Perjanjian"
-                              >
-                                <Printer className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => setEditingPinjaman(p)}
-                                className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
-                                title="Koreksi Kontrak"
-                              >
-                                <Edit className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => setDeletingPinjaman(p)}
-                                className="p-1 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-600 dark:text-rose-400 rounded transition cursor-pointer"
-                                title="Hapus Kontrak"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3 text-xs font-mono">
+                          <div className="text-right">
+                            <span className="text-[9px] text-slate-400 uppercase block font-sans font-bold">Total Plafon</span>
+                            <span className="font-bold text-slate-750 dark:text-slate-200">{formatRupiah(group.totalNominal)}</span>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-[9px] text-emerald-600 uppercase block font-sans font-bold">Disbursed</span>
+                            <span className="font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah(group.totalDisbursed)}</span>
+                          </div>
+                          <div className="text-right hidden sm:block">
+                            <span className="text-[9px] text-slate-400 uppercase block font-sans font-bold">Tagihan / Bln</span>
+                            <span className="font-bold text-slate-700 dark:text-slate-300">{formatRupiah(group.totalAngsuranBln)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Month Table */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm text-slate-600 dark:text-slate-350 bg-white dark:bg-slate-850">
+                          <thead className="bg-slate-50/90 dark:bg-slate-900/60 text-[10px] font-bold text-slate-400 uppercase border-b border-slate-100 dark:border-slate-700">
+                            <tr>
+                              <th className="px-4 py-2">Tanggal Akad</th>
+                              <th className="px-4 py-2">Anggota</th>
+                              <th className="px-4 py-2">Nominal Disbursed</th>
+                              <th className="px-4 py-2">Tenor & Cicilan</th>
+                              <th className="px-4 py-2 text-center">Status</th>
+                              <th className="px-4 py-2 text-center w-20">Aksi</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-750 font-mono text-xs">
+                            {group.loans.map((p) => {
+                              const mInfo = members.find(m => m.id === p.anggotaId);
+                              const repays = angsuran.filter(a => a.pinjamanId === p.id);
+                              const sisaPinjaman = calculateLoanOutstanding(p, repays);
+                              const isLoanLunas = p.status === 'Lunas' || sisaPinjaman <= 0;
+                              const displayStatus = isLoanLunas ? 'Lunas' : 'Belum Lunas';
+                              return (
+                                <tr key={p.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
+                                  <td className="px-4 py-2.5 whitespace-nowrap">
+                                    <p className="font-bold text-slate-800 dark:text-slate-100">{p.tanggal}</p>
+                                    <p className="text-[9px] text-slate-400">Provisi {p.biayaProvisiPersen}%: {formatRupiah(p.provisiDipotong)}</p>
+                                  </td>
+                                  <td className="px-4 py-2.5">
+                                    {onNavigateToAngsuran ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => onNavigateToAngsuran(repays[0]?.id, p.anggotaId, mInfo?.nama)}
+                                        className="font-sans font-semibold text-slate-800 dark:text-slate-200 hover:text-emerald-600 dark:hover:text-emerald-400 transition cursor-pointer text-left flex items-center gap-1 group/btn"
+                                        title="Klik nama untuk melihat Data Mutasi Angsuran di Menu Buku Kas & Mutasi"
+                                      >
+                                        <span>{mInfo?.nama || 'N/A'}</span>
+                                        <ArrowUpRight className="w-3 h-3 opacity-0 group-hover/btn:opacity-100 text-emerald-600 dark:text-emerald-400 transition shrink-0" />
+                                      </button>
+                                    ) : (
+                                      <p className="font-sans font-semibold text-slate-800 dark:text-slate-200">{mInfo?.nama || 'N/A'}</p>
+                                    )}
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                      <span className="text-[10px] text-slate-400">{mInfo?.noAnggota}</span>
+                                      {onNavigateToAngsuran && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onNavigateToAngsuran(repays[0]?.id, p.anggotaId, mInfo?.nama)}
+                                          className="text-[9.5px] font-sans font-bold text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-350 hover:underline flex items-center gap-0.5 cursor-pointer ml-1"
+                                          title="Lihat Data Mutasi Angsuran di Menu Buku Kas & Mutasi"
+                                        >
+                                          <Receipt className="w-2.5 h-2.5" /> Mutasi Angsuran
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-2.5">
+                                    <p className="font-bold text-slate-800 dark:text-slate-100">{formatRupiah(p.nominalPinjaman)}</p>
+                                    <p className="text-[9px] text-emerald-600">Disbursed: {formatRupiah(p.jumlahDiterima)}</p>
+                                  </td>
+                                  <td className="px-4 py-2.5 whitespace-nowrap">
+                                    <p className="font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah(p.totalAngsuranPerBulan)}/bln</p>
+                                    <p className="text-[9px] text-slate-400">Tenor: {p.tenor} Bulan | Jasa: {p.bungaFlatPersen}%</p>
+                                  </td>
+                                  <td className="px-4 py-2.5 text-center">
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                      isLoanLunas ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-900/20' : 'bg-rose-50 text-rose-800 dark:bg-rose-950/20'
+                                    }`}>
+                                      {displayStatus}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-2.5 text-center">
+                                    <div className="flex items-center justify-center gap-1.5">
+                                      {onNavigateToAngsuran && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onNavigateToAngsuran(repays[0]?.id, p.anggotaId, mInfo?.nama)}
+                                          className="p-1 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
+                                          title="Buka Data Mutasi Angsuran di Menu Buku Kas & Mutasi"
+                                        >
+                                          <Receipt className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                      <button
+                                        onClick={() => handlePrintLoanContract(p)}
+                                        className="p-1 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
+                                        title="Cetak Akad Perjanjian"
+                                      >
+                                        <Printer className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        onClick={() => setEditingPinjaman(p)}
+                                        className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
+                                        title="Koreksi Kontrak"
+                                      >
+                                        <Edit className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        onClick={() => setDeletingPinjaman(p)}
+                                        className="p-1 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-600 dark:text-rose-400 rounded transition cursor-pointer"
+                                        title="Hapus Kontrak"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : (
+              /* Single Table View */
+              <div className="overflow-x-auto flex-1 max-h-[460px]">
+                <table className="w-full text-left text-sm text-slate-600 dark:text-slate-350">
+                  <thead className="bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-400 uppercase sticky top-0 border-b border-slate-100 dark:border-slate-700">
+                    <tr>
+                      <th className="px-4 py-2.5">Arsip</th>
+                      <th className="px-4 py-2.5">Anggota</th>
+                      <th className="px-4 py-2.5">Nominal Disbursed</th>
+                      <th className="px-4 py-2.5">Tenor & Cicilan</th>
+                      <th className="px-4 py-2.5 text-center">Status</th>
+                      <th className="px-4 py-2.5 text-center w-20">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700 font-mono text-xs">
+                    {filteredPinjaman.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="px-4 py-12 text-center text-slate-455 italic">
+                          {selectedMonthFilter !== 'semua' 
+                            ? `Tidak ada transaksi akad kredit pada bulan ${formatYearMonthIndo(selectedMonthFilter)}`
+                            : 'Belum ada kontrak kredit tersimpan'}
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredPinjaman.map((p) => {
+                        const mInfo = members.find(m => m.id === p.anggotaId);
+                        const repays = angsuran.filter(a => a.pinjamanId === p.id);
+                        const sisaPinjaman = calculateLoanOutstanding(p, repays);
+                        const isLoanLunas = p.status === 'Lunas' || sisaPinjaman <= 0;
+                        const displayStatus = isLoanLunas ? 'Lunas' : 'Belum Lunas';
+                        return (
+                          <tr key={p.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
+                            <td className="px-4 py-2.5 whitespace-nowrap">
+                              <p className="font-bold">{p.tanggal}</p>
+                              <p className="text-[9px] text-slate-400">Provisi {p.biayaProvisiPersen}%: {formatRupiah(p.provisiDipotong)}</p>
+                            </td>
+                            <td className="px-4 py-2.5">
+                              {onNavigateToAngsuran ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onNavigateToAngsuran(repays[0]?.id, p.anggotaId, mInfo?.nama)}
+                                  className="font-sans font-semibold text-slate-800 dark:text-slate-200 hover:text-emerald-600 dark:hover:text-emerald-400 transition cursor-pointer text-left flex items-center gap-1 group/btn"
+                                  title="Klik nama untuk melihat Data Mutasi Angsuran di Menu Buku Kas & Mutasi"
+                                >
+                                  <span>{mInfo?.nama || 'N/A'}</span>
+                                  <ArrowUpRight className="w-3 h-3 opacity-0 group-hover/btn:opacity-100 text-emerald-600 dark:text-emerald-400 transition shrink-0" />
+                                </button>
+                              ) : (
+                                <p className="font-sans font-semibold text-slate-800 dark:text-slate-200">{mInfo?.nama || 'N/A'}</p>
+                              )}
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <span className="text-[10px] text-slate-400">{mInfo?.noAnggota}</span>
+                                {onNavigateToAngsuran && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onNavigateToAngsuran(repays[0]?.id, p.anggotaId, mInfo?.nama)}
+                                    className="text-[9.5px] font-sans font-bold text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-350 hover:underline flex items-center gap-0.5 cursor-pointer ml-1"
+                                    title="Lihat Data Mutasi Angsuran di Menu Buku Kas & Mutasi"
+                                  >
+                                    <Receipt className="w-2.5 h-2.5" /> Mutasi Angsuran
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <p className="font-bold text-slate-800 dark:text-slate-100">{formatRupiah(p.nominalPinjaman)}</p>
+                              <p className="text-[9px] text-emerald-600">Disbursed: {formatRupiah(p.jumlahDiterima)}</p>
+                            </td>
+                            <td className="px-4 py-2.5 whitespace-nowrap">
+                              <p className="font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah(p.totalAngsuranPerBulan)}/bln</p>
+                              <p className="text-[9px] text-slate-400">Tenor: {p.tenor} Bulan | Jasa: {p.bungaFlatPersen}%</p>
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                isLoanLunas ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-900/20' : 'bg-rose-50 text-rose-800 dark:bg-rose-950/20'
+                              }`}>
+                                {displayStatus}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2.5 text-center">
+                              <div className="flex items-center justify-center gap-1.5">
+                                {onNavigateToAngsuran && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onNavigateToAngsuran(repays[0]?.id, p.anggotaId, mInfo?.nama)}
+                                    className="p-1 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
+                                    title="Buka Data Mutasi Angsuran di Menu Buku Kas & Mutasi"
+                                  >
+                                    <Receipt className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handlePrintLoanContract(p)}
+                                  className="p-1 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
+                                  title="Cetak Akad Perjanjian"
+                                >
+                                  <Printer className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => setEditingPinjaman(p)}
+                                  className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 rounded transition cursor-pointer"
+                                  title="Koreksi Kontrak"
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => setDeletingPinjaman(p)}
+                                  className="p-1 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-600 dark:text-rose-400 rounded transition cursor-pointer"
+                                  title="Hapus Kontrak"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )
           ) : (
             <div className="overflow-x-auto flex-1 max-h-[300px]">
               <table className="w-full text-left text-sm text-slate-600 dark:text-slate-350">
@@ -3989,24 +5402,44 @@ export function PinjamanView({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700 font-mono text-xs">
-                  {pengajuanPinjaman.length === 0 ? (
+                  {filteredPengajuan.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="px-4 py-12 text-center text-slate-455 italic">Belum ada pengajuan pinjaman tersimpan</td>
                     </tr>
                   ) : (
-                    pengajuanPinjaman.map((p) => {
+                    filteredPengajuan.map((p) => {
                       const mInfo = members.find(m => m.id === p.anggotaId);
+                      const isPartial = p.status === 'Disetujui Sebagian';
                       return (
                         <tr key={p.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
                           <td className="px-4 py-3 whitespace-nowrap">
                             <p className="font-bold text-slate-700 dark:text-slate-300">{p.tanggalPengajuan}</p>
+                            {p.tanggalDiproses && (
+                              <p className="text-[9px] text-slate-400">Diproses: {p.tanggalDiproses}</p>
+                            )}
                           </td>
                           <td className="px-4 py-3">
                             <p className="font-sans font-semibold text-slate-800 dark:text-slate-200">{mInfo?.nama || 'Anggota'}</p>
                             <p className="text-[10px] text-slate-400">{mInfo?.noAnggota || 'N/A'}</p>
                           </td>
                           <td className="px-4 py-3">
-                            <p className="font-bold text-slate-850 dark:text-slate-100">{formatRupiah(p.nominalPinjaman)}</p>
+                            {isPartial ? (
+                              <div>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-bold text-indigo-700 dark:text-indigo-400 font-mono">
+                                    {formatRupiah(p.nominalDisetujui || p.nominalPinjaman)}
+                                  </span>
+                                  <span className="text-[9px] px-1.5 py-0.2 bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 rounded font-bold">
+                                    ACC Sebagian
+                                  </span>
+                                </div>
+                                <p className="text-[9px] text-slate-400 line-through">
+                                  Pengajuan: {formatRupiah(p.nominalPengajuanAwal || p.nominalPinjaman)}
+                                </p>
+                              </div>
+                            ) : (
+                              <p className="font-bold text-slate-850 dark:text-slate-100 font-mono">{formatRupiah(p.nominalPinjaman)}</p>
+                            )}
                             <p className="text-[9px] text-slate-400">Adm Provisi {p.biayaProvisiPersen}%: -{formatRupiah(p.provisiDipotong)}</p>
                             <p className="text-[9.5px] text-emerald-600 font-bold">Bersih: {formatRupiah(p.jumlahDiterima)}</p>
                           </td>
@@ -4014,30 +5447,64 @@ export function PinjamanView({
                             <p className="font-bold text-slate-800 dark:text-slate-200">{p.tenor} Bulan</p>
                             <p className="text-[9px] text-slate-400">Jasa Flat: {p.bungaFlatPersen}%/bln</p>
                           </td>
-                          <td className="px-4 py-3 font-sans max-w-[150px]">
+                          <td className="px-4 py-3 font-sans max-w-[170px]">
                             <p className="text-xs text-slate-600 dark:text-slate-350 line-clamp-2" title={p.alasanPengajuan}>{p.alasanPengajuan || '-'}</p>
                             {p.catatanPengurus && (
-                              <p className="text-[10px] text-emerald-600 dark:text-emerald-450 italic mt-1 font-semibold">Tanggapan: {p.catatanPengurus}</p>
+                              <div className={`mt-1 p-1.5 rounded text-[10px] leading-snug border ${
+                                isPartial 
+                                  ? 'bg-indigo-50/70 border-indigo-200 text-indigo-800 dark:bg-indigo-950/40 dark:border-indigo-800 dark:text-indigo-300'
+                                  : 'bg-slate-50 border-slate-200 text-emerald-700 dark:bg-slate-800 dark:border-slate-700 dark:text-emerald-400'
+                              }`}>
+                                <span className="font-bold block text-[9px] uppercase tracking-wider">Catatan Pengurus:</span>
+                                <span>{p.catatanPengurus}</span>
+                              </div>
                             )}
                           </td>
                           <td className="px-4 py-3 text-center">
                             {p.status === 'Pending' ? (
-                              <div className="flex flex-col sm:flex-row gap-1 justify-center">
+                              <div className="flex flex-col gap-1.5 items-center justify-center min-w-[130px]">
+                                <div className="flex items-center gap-1 w-full justify-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleActionWithNotes(p.id, 'APPROVE')}
+                                    className="flex-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded text-[9.5px] cursor-pointer transition shadow-xs text-center"
+                                    title="Setujui Penuh 100%"
+                                  >
+                                    Setujui
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleActionWithNotes(p.id, 'PARTIAL')}
+                                    className="flex-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded text-[9.5px] cursor-pointer transition flex items-center justify-center gap-0.5 shadow-xs text-center"
+                                    title="Setujui Sebagian (Input Nominal Kurang dari Pengajuan)"
+                                  >
+                                    <Scale className="w-2.5 h-2.5" />
+                                    Sebagian
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleActionWithNotes(p.id, 'REJECT')}
+                                    className="px-1.5 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded text-[9.5px] cursor-pointer transition shadow-xs text-center"
+                                    title="Tolak Pengajuan"
+                                  >
+                                    Tolak
+                                  </button>
+                                </div>
                                 <button
                                   type="button"
-                                  onClick={() => handleActionWithNotes(p.id, 'APPROVE')}
-                                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded text-[9.5px] cursor-pointer transition"
+                                  onClick={() => setAiModalProposal(p)}
+                                  className="w-full px-2 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold rounded text-[9.5px] cursor-pointer transition flex items-center justify-center gap-1 shadow-xs"
+                                  title="Rekomendasi Pakar kelayakan kredit & riwayat transaksi"
                                 >
-                                  Setujui
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleActionWithNotes(p.id, 'REJECT')}
-                                  className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded text-[9.5px] cursor-pointer transition"
-                                >
-                                  Tolak
+                                  <Sparkles className="w-3 h-3 text-amber-300 animate-pulse" />
+                                  Rekomendasi Pakar
                                 </button>
                               </div>
+                            ) : isPartial ? (
+                              <span className="px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-800 border border-indigo-200 dark:bg-indigo-950/60 dark:text-indigo-300 dark:border-indigo-800 inline-flex items-center gap-1">
+                                <Scale className="w-3 h-3" />
+                                Disetujui Sebagian
+                              </span>
                             ) : (
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                                 p.status === 'Disetujui' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'
@@ -4058,110 +5525,368 @@ export function PinjamanView({
 
       </div>
 
-      {/* INTERACTIVE APPROVE/REJECT NOTES MODAL */}
+      {/* INTERACTIVE APPROVE/REJECT/PARTIAL NOTES MODAL */}
       <AnimatePresence>
-        {actionModal && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+        {actionModal && modalProposal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-3 sm:p-4">
             <motion.div 
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white dark:bg-slate-800 p-6 rounded-2xl max-w-md w-full border border-slate-150 dark:border-slate-700 shadow-2xl space-y-4"
+              className="bg-white dark:bg-slate-850 p-5 sm:p-6 rounded-2xl max-w-lg w-full border border-slate-200 dark:border-slate-750 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto"
             >
-              <h3 className="text-base font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                {actionModal.type === 'APPROVE' ? (
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                ) : (
-                  <X className="w-5 h-5 text-rose-600" />
-                )}
-                {actionModal.type === 'APPROVE' ? 'Persetujuan Pengajuan Pinjaman' : 'Penolakan Pengajuan Pinjaman'}
-              </h3>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`p-2 rounded-xl text-white ${
+                    actionModal.type === 'APPROVE' ? 'bg-emerald-600' :
+                    actionModal.type === 'PARTIAL' ? 'bg-indigo-600' : 'bg-rose-600'
+                  }`}>
+                    {actionModal.type === 'APPROVE' ? (
+                      <CheckCircle2 className="w-5 h-5" />
+                    ) : actionModal.type === 'PARTIAL' ? (
+                      <Scale className="w-5 h-5" />
+                    ) : (
+                      <X className="w-5 h-5" />
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-850 dark:text-slate-100">
+                      {actionModal.type === 'APPROVE' ? 'Persetujuan Penuh Pinjaman (ACC Penuh)' :
+                       actionModal.type === 'PARTIAL' ? 'Persetujuan Sebagian Pinjaman (ACC Sebagian)' :
+                       'Penolakan Pengajuan Pinjaman'}
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {actionModal.type === 'PARTIAL'
+                        ? 'Nominal disetujui ditentukan manual oleh pengurus untuk dikirim ke anggota'
+                        : actionModal.type === 'APPROVE'
+                        ? 'Menyetujui 100% plafon pengajuan anggota'
+                        : 'Menolak permohonan pinjaman dengan memberikan alasan tertulis'}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setActionModal(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Quick AI Assistant Consultation Strip */}
+              <div className="p-3 bg-gradient-to-r from-purple-50 via-indigo-50 to-purple-50 dark:from-purple-950/40 dark:via-indigo-950/40 dark:to-purple-950/40 border border-indigo-200 dark:border-indigo-800 rounded-xl flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-purple-600 dark:text-purple-400 animate-pulse shrink-0" />
+                  <span className="text-xs text-indigo-950 dark:text-indigo-200">
+                    Bingung menentukan nominal atau keputusan?
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAiModalProposal(modalProposal);
+                  }}
+                  className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0 shadow-xs cursor-pointer"
+                >
+                  <Bot className="w-3.5 h-3.5" />
+                  Konsultasi AI
+                </button>
+              </div>
               
               <div className="space-y-3 text-sm text-slate-600 dark:text-slate-300">
-                <p className="text-xs leading-relaxed">
-                  Apakah Anda yakin ingin {actionModal.type === 'APPROVE' ? 'menyetujui & mencairkan' : 'menolak'} permohonan pinjaman ini?
-                </p>
+                {/* Member Summary Box */}
+                <div className="p-3.5 bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-xl space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-500 font-medium">PEMOHON:</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-200">
+                      {members.find(m => m.id === modalProposal.anggotaId)?.nama || modalProposal.anggotaId} ({members.find(m => m.id === modalProposal.anggotaId)?.noAnggota || '-'})
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-500 font-medium">PENGAJUAN AWAL:</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-100 font-mono">
+                      {formatRupiah(modalProposal.nominalPengajuanAwal || modalProposal.nominalPinjaman)} ({modalProposal.tenor} Bulan)
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-500 font-medium">KEPERLUAN:</span>
+                    <span className="text-slate-700 dark:text-slate-300 italic text-[11px]">
+                      {modalProposal.alasanPengajuan || '-'}
+                    </span>
+                  </div>
+                </div>
 
-                {actionModal.type === 'APPROVE' && modalProposal && (
-                  <div className="p-3.5 bg-slate-50 dark:bg-slate-900/55 border border-slate-150 dark:border-slate-750 rounded-xl space-y-2.5">
-                    <div className="flex justify-between text-[11px]">
-                      <span className="text-slate-400 font-medium">PEMOHON:</span>
-                      <span className="font-bold text-slate-800 dark:text-slate-200">{modalProposal.namaAnggota} ({modalProposal.noAnggota})</span>
+                {/* PARTIAL APPROVAL SECTION */}
+                {actionModal.type === 'PARTIAL' && (
+                  <div className="p-3.5 bg-indigo-50/50 dark:bg-indigo-950/25 border border-indigo-200 dark:border-indigo-800/60 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-bold text-indigo-900 dark:text-indigo-200 flex items-center gap-1.5">
+                        <Scale className="w-3.5 h-3.5 text-indigo-600" />
+                        NOMINAL DISETUJUI SEBAGIAN (INPUT PENGURUS):
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => handleActionWithNotes(modalProposal.id, 'APPROVE')}
+                        className="text-[11px] text-indigo-600 hover:text-indigo-700 underline font-semibold cursor-pointer"
+                      >
+                        Beralih ke Setujui Penuh
+                      </button>
                     </div>
-                    <div className="flex justify-between text-[11px]">
-                      <span className="text-slate-400 font-medium">DIAJUKAN AWAL:</span>
-                      <span className="font-bold text-rose-600 dark:text-rose-400 font-mono">{formatRupiah(modalProposal.nominalPinjaman)} ({modalProposal.tenor} Bulan)</span>
+
+                    <div className="relative">
+                      <span className="absolute left-3 top-2.5 text-slate-400 font-bold font-mono text-xs">Rp</span>
+                      <input 
+                        type="text"
+                        required
+                        value={approvedNominalStr}
+                        onChange={(e) => {
+                          const rawVal = e.target.value.replace(/\D/g, '');
+                          const formatted = rawVal ? new Intl.NumberFormat('id-ID').format(parseInt(rawVal, 10)) : '';
+                          setApprovedNominalStr(formatted);
+                        }}
+                        placeholder="Masukkan nominal disetujui (contoh: 2.500.000)"
+                        className="w-full pl-9 pr-3 py-2 text-sm border rounded-xl bg-white dark:bg-slate-900 border-indigo-300 dark:border-indigo-700 text-slate-900 dark:text-white font-mono font-bold focus:ring-2 focus:ring-indigo-600 focus:outline-none"
+                      />
                     </div>
-                    <div className="border-t border-dashed border-slate-200 dark:border-slate-700 pt-2.5 space-y-1.5">
-                      <label className="text-xs font-bold text-emerald-700 dark:text-emerald-400 block">NOMINAL ACC (DISETUJUI):</label>
-                      <div className="relative">
-                        <span className="absolute left-3 top-2 text-slate-400 font-bold font-mono text-xs">Rp</span>
-                        <input 
-                          type="text"
-                          required
-                          value={approvedNominalStr}
-                          onChange={(e) => {
-                            const rawVal = e.target.value.replace(/\D/g, '');
-                            const formatted = rawVal ? new Intl.NumberFormat('id-ID').format(parseInt(rawVal, 10)) : '';
-                            setApprovedNominalStr(formatted);
-                          }}
-                          placeholder="Contoh: 2.000.000"
-                          className="w-full pl-9 pr-3 py-1.5 text-xs border rounded-lg bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 font-mono font-bold focus:ring-2 focus:ring-emerald-600 focus:outline-none"
-                        />
-                      </div>
-                      {(() => {
-                        const cleanNum = parseFloat(approvedNominalStr.replace(/\D/g, '')) || 0;
-                        if (cleanNum > 0) {
-                          const provisi = (cleanNum * modalProposal.biayaProvisiPersen) / 100;
-                          const diterima = cleanNum - provisi;
-                          return (
-                            <div className="text-[10.5px] space-y-0.5 text-slate-500 font-medium pt-0.5 leading-relaxed">
-                              <p className="font-sans italic text-emerald-650 dark:text-emerald-400">Terbilang: {terbilang(cleanNum)} Rupiah</p>
-                              <p>Potongan Provisi ({modalProposal.biayaProvisiPersen}%): {formatRupiah(provisi)}</p>
-                              <p className="font-bold text-slate-800 dark:text-slate-200">Jumlah diterima anggota: {formatRupiah(diterima)}</p>
+
+                    {/* Quick Percentage Presets */}
+                    <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                      <span className="text-slate-500 font-semibold">Preset Cepat:</span>
+                      {[0.5, 0.6, 0.7, 0.8].map((pct) => {
+                        const val = Math.round(((modalProposal.nominalPengajuanAwal || modalProposal.nominalPinjaman) * pct) / 100000) * 100000;
+                        return (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => {
+                              setApprovedNominalStr(new Intl.NumberFormat('id-ID').format(val));
+                              setCatatanPengurusForm(`Disetujui sebagian sebesar ${formatRupiah(val)} (${pct * 100}% dari pengajuan) dengan pertimbangan batas simpanan anggota.`);
+                            }}
+                            className="px-2 py-0.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-500 rounded text-slate-700 dark:text-slate-300 font-mono font-bold transition cursor-pointer"
+                          >
+                            {pct * 100}% ({formatRupiah(val)})
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Live Financial Breakdown & Validation */}
+                    {(() => {
+                      const cleanNum = parseFloat(approvedNominalStr.replace(/\D/g, '')) || 0;
+                      const initialNom = modalProposal.nominalPengajuanAwal || modalProposal.nominalPinjaman;
+
+                      if (cleanNum >= initialNom) {
+                        return (
+                          <div className="p-2.5 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-lg text-rose-800 dark:text-rose-200 text-xs flex items-start gap-2">
+                            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                            <div>
+                              <p className="font-bold">Nominal melebihi atau sama dengan pengajuan!</p>
+                              <p className="text-[11px] mt-0.5">
+                                Untuk opsi Disetujui Sebagian, nominal harus lebih kecil dari {formatRupiah(initialNom)}. Gunakan opsi "Setujui Penuh" jika ingin menyetujui seluruhnya.
+                              </p>
                             </div>
-                          );
-                        }
-                        return null;
-                      })()}
+                          </div>
+                        );
+                      }
+
+                      if (cleanNum > 0) {
+                        const provisi = (cleanNum * modalProposal.biayaProvisiPersen) / 100;
+                        const diterima = cleanNum - provisi;
+                        const pokokBulan = Math.round(cleanNum / modalProposal.tenor);
+                        const jasaBulan = Math.round((cleanNum * modalProposal.bungaFlatPersen) / 100);
+                        const totalBulan = pokokBulan + jasaBulan;
+
+                        return (
+                          <div className="p-3 bg-white dark:bg-slate-900 border border-indigo-100 dark:border-indigo-900 rounded-xl text-xs space-y-1.5">
+                            <p className="font-sans italic text-indigo-700 dark:text-indigo-400 font-semibold text-[11px]">
+                              Terbilang: {terbilang(cleanNum)} Rupiah
+                            </p>
+                            <div className="grid grid-cols-2 gap-2 text-[11px] pt-1">
+                              <div>
+                                <span className="text-slate-400 block">Potongan Provisi ({modalProposal.biayaProvisiPersen}%):</span>
+                                <span className="font-mono font-bold text-slate-700 dark:text-slate-200">
+                                  {formatRupiah(provisi)}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-slate-400 block">Bersih Diterima Anggota:</span>
+                                <span className="font-mono font-bold text-emerald-600">
+                                  {formatRupiah(diterima)}
+                                </span>
+                              </div>
+                              <div className="col-span-2 pt-1 border-t border-slate-100 dark:border-slate-800 flex justify-between">
+                                <span className="text-slate-500">Estimasi Angsuran per Bulan ({modalProposal.tenor}x):</span>
+                                <span className="font-mono font-bold text-slate-800 dark:text-slate-100">
+                                  {formatRupiah(totalBulan)}/bln
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+                )}
+
+                {/* FULL APPROVAL SECTION */}
+                {actionModal.type === 'APPROVE' && (
+                  <div className="p-3.5 bg-emerald-50/50 dark:bg-emerald-950/25 border border-emerald-200 dark:border-emerald-800/60 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-emerald-800 dark:text-emerald-300">
+                        Disetujui Penuh Sebesar:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleActionWithNotes(modalProposal.id, 'PARTIAL')}
+                        className="text-[11px] text-indigo-600 hover:text-indigo-700 underline font-semibold cursor-pointer"
+                      >
+                        Beralih ke Setujui Sebagian
+                      </button>
+                    </div>
+                    <p className="font-mono text-lg font-black text-emerald-700 dark:text-emerald-400">
+                      {formatRupiah(modalProposal.nominalPinjaman)}
+                    </p>
+                    <div className="text-[11px] text-slate-600 dark:text-slate-400 space-y-0.5">
+                      <p>Potongan Provisi ({modalProposal.biayaProvisiPersen}%): {formatRupiah(modalProposal.provisiDipotong)}</p>
+                      <p className="font-bold text-slate-800 dark:text-slate-200">
+                        Jumlah Bersih Dicairkan: {formatRupiah(modalProposal.jumlahDiterima)}
+                      </p>
                     </div>
                   </div>
                 )}
 
-                <div className="pt-1">
-                  <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 block mb-1">Catatan / Tanggapan Pengurus</label>
+                {/* NOTES / REASON FOR MEMBER */}
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block">
+                      Catatan / Tanggapan Pengurus (Dikirim ke Anggota):
+                    </label>
+                    {actionModal.type === 'PARTIAL' && (
+                      <span className="text-[10px] text-indigo-600 font-semibold">Wajib Diisi</span>
+                    )}
+                  </div>
                   <textarea
-                    rows={2}
+                    rows={3}
                     value={catatanPengurusForm}
                     onChange={(e) => setCatatanPengurusForm(e.target.value)}
-                    placeholder="Masukkan catatan keputusan pengurus (misal: Suku bunga disepakati, Alasan penolakan, dsb.)..."
-                    className="w-full px-3 py-2 text-xs bg-slate-50 dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 focus:ring-2 focus:ring-emerald-700 focus:outline-none placeholder:text-[11px]"
+                    placeholder={
+                      actionModal.type === 'PARTIAL'
+                        ? 'Contoh: Disetujui sebagian Rp 2.500.000 mempertimbangkan saldo simpanan dan riwayat angsuran...'
+                        : actionModal.type === 'APPROVE'
+                        ? 'Contoh: Pengajuan telah disetujui penuh oleh pengurus. Dana dapat diambil di bendahara...'
+                        : 'Contoh: Mohon maaf, belum dapat disetujui karena masih terdapat pinjaman aktif...'
+                    }
+                    className="w-full px-3 py-2 text-xs bg-slate-50 dark:bg-slate-900 border rounded-xl text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 focus:ring-2 focus:ring-indigo-600 focus:outline-none placeholder:text-[11px] leading-relaxed"
                   />
+
+                  {/* Fast Template Snippets */}
+                  <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                    <span className="text-slate-400">Template Cepat:</span>
+                    {actionModal.type === 'PARTIAL' ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setCatatanPengurusForm('Disetujui sebagian disesuaikan dengan batas rasio simpanan wajib dan pokok anggota.')}
+                          className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 hover:bg-indigo-100 text-slate-600 dark:text-slate-300 rounded transition cursor-pointer"
+                        >
+                          Rasio Simpanan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCatatanPengurusForm('Disetujui sebagian sesuai batas plafon kredit pemula koperasi.')}
+                          className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 hover:bg-indigo-100 text-slate-600 dark:text-slate-300 rounded transition cursor-pointer"
+                        >
+                          Plafon Pemula
+                        </button>
+                      </>
+                    ) : actionModal.type === 'APPROVE' ? (
+                      <button
+                        type="button"
+                        onClick={() => setCatatanPengurusForm('Disetujui penuh. Rekam jejak simpanan dan angsuran sangat baik.')}
+                        className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 hover:bg-emerald-100 text-slate-600 dark:text-slate-300 rounded transition cursor-pointer"
+                      >
+                        Riwayat Baik
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setCatatanPengurusForm('Belum memenuhi syarat batas simpanan wajib atau masih ada tanggungan berjalan.')}
+                        className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 hover:bg-rose-100 text-slate-600 dark:text-slate-300 rounded transition cursor-pointer"
+                      >
+                        Simpanan Belum Cukup
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 pt-2">
+              {/* Action Buttons */}
+              <div className="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-800 flex-wrap gap-2">
                 <button
                   type="button"
                   onClick={() => setActionModal(null)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-lg transition cursor-pointer"
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-xl transition cursor-pointer"
                 >
                   Batal
                 </button>
+                
                 <button
                   type="button"
                   onClick={handleActionSubmit}
-                  className={`px-4 py-2 text-white text-xs font-bold rounded-lg transition cursor-pointer ${
-                    actionModal.type === 'APPROVE' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'
+                  className={`px-5 py-2 text-white text-xs font-bold rounded-xl shadow-sm transition cursor-pointer flex items-center gap-1.5 ${
+                    actionModal.type === 'APPROVE' ? 'bg-emerald-600 hover:bg-emerald-700' :
+                    actionModal.type === 'PARTIAL' ? 'bg-indigo-600 hover:bg-indigo-700' :
+                    'bg-rose-600 hover:bg-rose-700'
                   }`}
                 >
-                  Konfirmasi
+                  {actionModal.type === 'APPROVE' ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      Konfirmasi Setujui Penuh
+                    </>
+                  ) : actionModal.type === 'PARTIAL' ? (
+                    <>
+                      <Scale className="w-4 h-4" />
+                      Konfirmasi Setujui Sebagian
+                    </>
+                  ) : (
+                    <>
+                      <X className="w-4 h-4" />
+                      Konfirmasi Tolak Pengajuan
+                    </>
+                  )}
                 </button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
+
+      {/* LOAN AI ASSISTANT MODAL */}
+      {aiModalProposal && (
+        <LoanAIAssistantModal
+          isOpen={!!aiModalProposal}
+          onClose={() => setAiModalProposal(null)}
+          proposal={aiModalProposal}
+          member={members.find(m => m.id === aiModalProposal.anggotaId) || null}
+          financialSummary={getMemberFinancialSummary(
+            aiModalProposal.anggotaId, 
+            aiModalProposal.nominalPinjaman, 
+            aiModalProposal.tenor
+          )}
+          onApplyRecommendation={(rec, suggestedNominal, notes) => {
+            if (rec === 'SETUJUI') {
+              handleActionWithNotes(aiModalProposal.id, 'APPROVE', undefined, notes);
+            } else if (rec === 'SETUJUI_SEBAGIAN') {
+              handleActionWithNotes(aiModalProposal.id, 'PARTIAL', suggestedNominal, notes);
+            } else {
+              handleActionWithNotes(aiModalProposal.id, 'REJECT', undefined, notes);
+            }
+          }}
+        />
+      )}
 
       {/* EDIT LOAN CONTRACT MODAL */}
       <AnimatePresence>
@@ -4188,7 +5913,7 @@ export function PinjamanView({
                     required
                   >
                     {members.map(m => (
-                      <option key={m.id} value={m.id}>{m.noAnggota} - {m.nama}</option>
+                      <option key={m.id} value={m.id}>{m.nama} ({m.noAnggota})</option>
                     ))}
                   </select>
                 </div>
@@ -4222,9 +5947,12 @@ export function PinjamanView({
                     <div className="relative">
                       <span className="absolute left-2.5 text-slate-400 top-2.5 text-xs text-slate-500 font-mono font-bold">Rp</span>
                       <input 
-                        type="number"
-                        value={editingPinjaman.nominalPinjaman} 
-                        onChange={(e) => setEditingPinjaman({ ...editingPinjaman, nominalPinjaman: parseFloat(e.target.value) || 0 })}
+                        type="text"
+                        value={editingPinjaman.nominalPinjaman ? editingPinjaman.nominalPinjaman.toLocaleString('id-ID') : ''} 
+                        onChange={(e) => {
+                          const clean = e.target.value.replace(/\D/g, '');
+                          setEditingPinjaman({ ...editingPinjaman, nominalPinjaman: clean ? parseInt(clean, 10) : 0 });
+                        }}
                         className="w-full pl-8 pr-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-mono font-bold"
                         required
                       />
@@ -4237,12 +5965,9 @@ export function PinjamanView({
                       onChange={(e) => setEditingPinjaman({ ...editingPinjaman, tenor: parseInt(e.target.value) || 1 })}
                       className="w-full px-3 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 font-bold"
                     >
-                      <option value={3}>3 Bulan</option>
-                      <option value={6}>6 Bulan</option>
-                      <option value={10}>10 Bulan</option>
-                      <option value={12}>12 Bulan</option>
-                      <option value={18}>18 Bulan</option>
-                      <option value={24}>24 Bulan</option>
+                      {Array.from({ length: 20 }, (_, i) => i + 1).map((m) => (
+                        <option key={m} value={m}>{m} Bulan</option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -4374,19 +6099,29 @@ export function PinjamanView({
 interface AngsuranProps {
   setup?: KoperasiSetup;
   members: Member[];
+  simpanan?: Simpanan[];
   pinjaman: Pinjaman[];
   angsuran: Angsuran[];
-  onAddAngsuran: (a: Omit<Angsuran, 'id'>, updatePinjamanStatus: boolean) => void;
+  onAddAngsuran: (a: Omit<Angsuran, 'id'> | Omit<Angsuran, 'id'>[], updatePinjamanStatus: boolean) => void;
   onDeleteAngsuran?: (id: string) => void;
 }
 
-export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran, onDeleteAngsuran }: AngsuranProps) {
+export function AngsuranView({ setup, members, simpanan = [], pinjaman, angsuran, onAddAngsuran, onDeleteAngsuran }: AngsuranProps) {
   const [pinjamanId, setPinjamanId] = useState('');
   const [bayarDate, setBayarDate] = useState(new Date().toISOString().substring(0, 10));
   const [customAmount, setCustomAmount] = useState('');
   const [bulanKe, setBulanKe] = useState(1);
   const [notes, setNotes] = useState('');
+  const [payOption, setPayOption] = useState<'rutin' | 'dobel' | 'lunas'>('rutin');
   const [previewReceipt, setPreviewReceipt] = useState<Angsuran | null>(null);
+  const [deleteModalState, setDeleteModalState] = useState<{
+    isOpen: boolean;
+    itemType: string;
+    itemName: string;
+    itemDetails?: { label: string; value: string; isHighlight?: boolean }[];
+    warningMessage?: string;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
 
   // Auto outstanding calculation
   const calculatedActiveContract = useMemo(() => {
@@ -4398,33 +6133,48 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
     // Calculated total already paid
     const relatedPayments = angsuran.filter(a => a.pinjamanId === pinjamanId);
     const totalTerbayar = relatedPayments.reduce((acc, c) => acc + c.jumlahBayar, 0);
-    const sisa = contract.status === 'Lunas' ? 0 : Math.max(0, Math.round(contract.nominalPinjaman - (totalTerbayar * (contract.nominalPinjaman / contract.totalWajibBayar))));
+
+    const nominalPinjaman = contract.nominalPinjaman || 0;
+    const totalPokokTerbayar = relatedPayments.reduce((acc, c) => acc + calculateAngsuranPrincipal(c, contract), 0);
+    const sisaPokok = contract.status === 'Lunas' ? 0 : Math.max(0, nominalPinjaman - totalPokokTerbayar);
+    const monthlyInterest = contract.jasaPerBulan > 0 
+      ? contract.jasaPerBulan 
+      : Math.round(nominalPinjaman * (contract.bungaFlatPersen ? contract.bungaFlatPersen / 100 : 0.015));
+    const jasaBulanBerjalan = contract.status === 'Lunas' ? 0 : Math.round(monthlyInterest);
+    const nominalBayarLunas = sisaPokok + jasaBulanBerjalan;
+
+    const sisa = sisaPokok;
 
     return {
       contract,
       mInfo,
       totalTerbayar,
+      totalPokokTerbayar,
       sisa,
+      sisaPokok,
+      jasaBulanBerjalan,
+      nominalBayarLunas,
       relatedPayments
     };
   }, [pinjamanId, pinjaman, angsuran, members]);
 
   // Sisa Pinjaman Otomatis calculation
-  const getRemainingPrincipal = (pId: string, totalContractDebt: number) => {
+  const getRemainingPrincipal = (pId: string, _totalContractDebt?: number, currentAngsuran?: Angsuran) => {
     const pContract = pinjaman.find(p => p.id === pId);
     if (!pContract) return 0;
+    if (currentAngsuran) {
+      return calculateHistoricalLoanOutstanding(pContract, currentAngsuran, angsuran);
+    }
     if (pContract.status === 'Lunas') return 0;
     const historicalPays = angsuran.filter(a => a.pinjamanId === pId);
-    const totalPaid = historicalPays.reduce((acc, curr) => acc + curr.jumlahBayar, 0);
-    const remainingPrincipal = pContract.nominalPinjaman - (totalPaid * (pContract.nominalPinjaman / pContract.totalWajibBayar));
-    return Math.max(0, Math.round(remainingPrincipal));
+    return calculateLoanOutstanding(pContract, historicalPays);
   };
 
   // Print a single installment receipt (Kuitansi Resmi)
   const handlePrintSingle = (a: Angsuran) => {
     const member = members.find(m => m.id === a.anggotaId);
     const pContract = pinjaman.find(p => p.id === a.pinjamanId);
-    const remaining = pContract ? getRemainingPrincipal(a.pinjamanId, pContract.totalWajibBayar) : 0;
+    const remaining = pContract ? calculateHistoricalLoanOutstanding(pContract, a, angsuran) : 0;
     
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -4649,7 +6399,7 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
       .map(a => {
         const m = members.find(mem => mem.id === a.anggotaId);
         const pContract = pinjaman.find(p => p.id === a.pinjamanId);
-        const remaining = pContract ? getRemainingPrincipal(a.pinjamanId, pContract.totalWajibBayar) : 0;
+        const remaining = pContract ? calculateHistoricalLoanOutstanding(pContract, a, angsuran) : 0;
         return `
           <tr>
             <td><b>${m?.nama || 'N/A'}</b><br/><span style="font-size: 10px; color: #64748b;">ID: ${m?.noAnggota || 'N/A'}</span></td>
@@ -4745,45 +6495,150 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
       } else {
         setBulanKe(1);
       }
+      setPayOption('rutin');
+      setCustomAmount('');
     } else {
       setBulanKe(1);
+      setPayOption('rutin');
+      setCustomAmount('');
     }
-  }, [calculatedActiveContract]);
+  }, [pinjamanId]);
 
   // Handle pay submission
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!pinjamanId || !calculatedActiveContract) return;
 
-    // Use default contract instalment amount if custom fits empty
-    const nominalToPay = parseFloat(customAmount) || calculatedActiveContract.contract.totalAngsuranPerBulan;
+    const isBayarLunas = payOption === 'lunas';
+    const isBayarDobel = payOption === 'dobel';
+    const monthlyTotal = calculatedActiveContract.contract.totalAngsuranPerBulan;
+    const defaultNominal = isBayarLunas 
+      ? calculatedActiveContract.nominalBayarLunas 
+      : isBayarDobel
+      ? monthlyTotal * 2
+      : monthlyTotal;
+
+    const parsedVal = customAmount ? parseFloat(customAmount.replace(/\./g, '')) : NaN;
+    const nominalToPay = (!isNaN(parsedVal) && parsedVal > 0) ? parsedVal : defaultNominal;
     if (isNaN(nominalToPay) || nominalToPay <= 0) return;
 
     if (nominalToPay < 5000) {
-      const remainingDebt = calculatedActiveContract.sisa;
+      const remainingDebt = calculatedActiveContract.nominalBayarLunas;
       if (Math.abs(nominalToPay - remainingDebt) > 1 && nominalToPay < remainingDebt) {
         alert("Jumlah Angsuran tidak boleh kurang dari Rp 5.000. Minimal transaksi adalah Rp 5.000.");
         return;
       }
     }
 
-    // Check if after this payment, total received reaches or exceeds total contract liability
-    const afterPayAmount = calculatedActiveContract.totalTerbayar + nominalToPay;
-    const isLunas = afterPayAmount >= calculatedActiveContract.contract.totalWajibBayar;
+    // Check if this payment is for 2 months (Bulan Kemarin / Terlambat + Bulan Berjalan)
+    const isTwoMonths = !isBayarLunas && (
+      isBayarDobel ||
+      (monthlyTotal > 0 && nominalToPay >= monthlyTotal * 1.75 && nominalToPay <= monthlyTotal * 2.25) ||
+      Boolean(notes?.toLowerCase().includes('2 bulan') || notes?.toLowerCase().includes('2 kali') || notes?.toLowerCase().includes('dua bulan'))
+    );
+
+    if (isTwoMonths) {
+      const regPokok = calculatedActiveContract.contract.angsuranPokokPerBulan || Math.round(calculatedActiveContract.contract.nominalPinjaman / (calculatedActiveContract.contract.tenor || 1));
+      const regJasa = calculatedActiveContract.jasaBulanBerjalan;
+
+      let pokok1 = regPokok;
+      let jasa1 = regJasa;
+      let pokok2 = regPokok;
+      let jasa2 = regJasa;
+
+      if (nominalToPay !== monthlyTotal * 2) {
+        const halfPay = Math.round(nominalToPay / 2);
+        jasa1 = Math.min(halfPay, regJasa);
+        pokok1 = Math.max(0, halfPay - jasa1);
+        const rem = nominalToPay - (pokok1 + jasa1);
+        jasa2 = Math.min(rem, regJasa);
+        pokok2 = Math.max(0, rem - jasa2);
+      }
+
+      const totalPokok = pokok1 + pokok2;
+      const isLunas = (totalPokok >= calculatedActiveContract.sisaPokok);
+
+      const angsuran1: Omit<Angsuran, 'id'> = {
+        pinjamanId,
+        anggotaId: calculatedActiveContract.contract.anggotaId,
+        tanggal: bayarDate,
+        pokokBayar: pokok1,
+        jasaBayar: jasa1,
+        jumlahBayar: pokok1 + jasa1,
+        bulanKe: bulanKe,
+        keterangan: notes 
+          ? `${notes} (Angsuran Ke-${bulanKe} - Tunggakan Bulan Kemarin)` 
+          : `Angsuran ke-${bulanKe} (Tunggakan Bulan Kemarin)`
+      };
+
+      const angsuran2: Omit<Angsuran, 'id'> = {
+        pinjamanId,
+        anggotaId: calculatedActiveContract.contract.anggotaId,
+        tanggal: bayarDate,
+        pokokBayar: pokok2,
+        jasaBayar: jasa2,
+        jumlahBayar: pokok2 + jasa2,
+        bulanKe: bulanKe + 1,
+        keterangan: notes 
+          ? `${notes} (Angsuran Ke-${bulanKe + 1} - Bulan Berjalan)` 
+          : `Angsuran ke-${bulanKe + 1} (Bulan Berjalan)`
+      };
+
+      onAddAngsuran([angsuran1, angsuran2], isLunas);
+
+      setCustomAmount('');
+      setNotes('');
+      setPayOption('rutin');
+      setBulanKe(prev => prev + 2);
+      alert(`✅ Berhasil membukukan 2 Kali Angsuran sekaligus ke dalam sistem!\n\n` +
+        `1. Angsuran Ke-${bulanKe} (Tunggakan Bulan Kemarin): ${formatRupiah(pokok1 + jasa1)}\n` +
+        `2. Angsuran Ke-${bulanKe + 1} (Bulan Berjalan): ${formatRupiah(pokok2 + jasa2)}\n\n` +
+        `Total Diterima: ${formatRupiah(nominalToPay)}${isLunas ? '\nStatus pinjaman kini LUNAS.' : ''}`);
+      return;
+    }
+
+    // Peringatan jika jumlah angsuran tidak sesuai dengan tagihan standar akad
+    if (Math.abs(nominalToPay - defaultNominal) > 0) {
+      const isKurang = nominalToPay < defaultNominal;
+      const selisih = Math.abs(nominalToPay - defaultNominal);
+      const confirmMsg = `⚠️ PERINGATAN: JUMLAH ANGSURAN TIDAK SESUAI STANDAR AKAD\n\n` +
+        `• Tagihan Standar yang harus dibayar: ${formatRupiah(defaultNominal)}\n` +
+        `• Nominal yang Anda input: ${formatRupiah(nominalToPay)}\n` +
+        `• Status: ${isKurang ? `KURANG BAYAR (${formatRupiah(selisih)})` : `LEBIH BAYAR (+${formatRupiah(selisih)})`}\n\n` +
+        `Apakah Anda yakin ingin tetap menyimpan dan memproses transaksi angsuran dengan nominal kustom ini?`;
+
+      const proceed = window.confirm(confirmMsg);
+      if (!proceed) return;
+    }
+
+    // Prioritaskan Jasa Pinjaman, kemudian sisanya ke Pokok Pinjaman
+    const monthlyInterest = calculatedActiveContract.jasaBulanBerjalan;
+    const jasaBayar = Math.min(nominalToPay, monthlyInterest);
+    const pokokBayar = Math.max(0, nominalToPay - jasaBayar);
+
+    // Check if after this payment, loan is paid off
+    const isLunas = isBayarLunas || (pokokBayar >= calculatedActiveContract.sisaPokok);
+
+    const defaultNotes = isBayarLunas 
+      ? `Pelunasan Lunas (Sisa Pokok: ${formatRupiah(calculatedActiveContract.sisaPokok)} + Jasa Bulan Berjalan: ${formatRupiah(calculatedActiveContract.jasaBulanBerjalan)})` 
+      : `Pembayaran angsuran ke-${bulanKe} (Pokok: ${formatRupiah(pokokBayar)}, Jasa: ${formatRupiah(jasaBayar)})`;
 
     onAddAngsuran({
       pinjamanId,
       anggotaId: calculatedActiveContract.contract.anggotaId,
       tanggal: bayarDate,
+      pokokBayar,
+      jasaBayar,
       jumlahBayar: nominalToPay,
       bulanKe: bulanKe,
-      keterangan: notes || `Pembayaran angsuran ke-${bulanKe}`
+      keterangan: notes || defaultNotes
     }, isLunas);
 
     setCustomAmount('');
     setNotes('');
+    setPayOption('rutin');
     setBulanKe(prev => prev + 1);
-    alert(`Angsuran sejumlah ${formatRupiah(nominalToPay)} berhasil diproses!`);
+    alert(`Angsuran ${isLunas ? 'PELUNASAN LUNAS' : ''} sejumlah ${formatRupiah(nominalToPay)} berhasil diproses!${isLunas ? ' Status pinjaman kini LUNAS.' : ''}`);
   };
 
   // Filter out complete contracts to represent only pending loans
@@ -4852,22 +6707,113 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
             </div>
 
             {calculatedActiveContract && (
-              <div className="space-y-4 p-4 bg-slate-50 dark:bg-slate-950/40 border rounded-xl font-mono text-xs text-slate-700 dark:text-slate-350">
-                <div className="flex justify-between">
-                  <span>Kontrak Pihak:</span>
-                  <span className="font-bold text-slate-800 dark:text-slate-200">{calculatedActiveContract.mInfo?.nama}</span>
+              <div className="space-y-3">
+                {/* Option Selector for Rutin vs Dobel (2 Bulan) vs Bayar Lunas */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 label-id">OPSI PEMBAYARAN ANGSURAN</label>
+                  <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPayOption('rutin');
+                        setCustomAmount('');
+                        setNotes('');
+                      }}
+                      className={`py-2 px-1 text-[11px] sm:text-xs font-bold rounded-lg transition cursor-pointer text-center ${
+                        payOption === 'rutin'
+                          ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                      }`}
+                    >
+                      1 Bulan Rutin
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPayOption('dobel');
+                        setCustomAmount(formatInputRupiah(String(calculatedActiveContract.contract.totalAngsuranPerBulan * 2)));
+                        setNotes(`Bayar 2 Bulan Sekaligus (Tunggakan Bulan Ke-${bulanKe} + Bulan Berjalan Ke-${bulanKe + 1})`);
+                      }}
+                      className={`py-2 px-1 text-[11px] sm:text-xs font-bold rounded-lg transition cursor-pointer text-center ${
+                        payOption === 'dobel'
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 hover:bg-indigo-100'
+                      }`}
+                    >
+                      2 Bulan Sekaligus
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPayOption('lunas');
+                        setCustomAmount(formatInputRupiah(String(calculatedActiveContract.nominalBayarLunas)));
+                        setNotes(`Pelunasan Lunas (Sisa Pokok + Jasa Bulan Berjalan)`);
+                      }}
+                      className={`py-2 px-1 text-[11px] sm:text-xs font-bold rounded-lg transition cursor-pointer text-center flex items-center justify-center gap-1 ${
+                        payOption === 'lunas'
+                          ? 'bg-amber-500 text-white shadow-xs'
+                          : 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100'
+                      }`}
+                    >
+                      <span>⚡ Bayar Lunas</span>
+                    </button>
+                  </div>
                 </div>
-                <div className="flex justify-between">
-                  <span>Setoran Wajib Bulanan:</span>
-                  <span className="font-bold text-emerald-700">{formatRupiah(calculatedActiveContract.contract.totalAngsuranPerBulan)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Total yang Sudah Dibayar:</span>
-                  <span className="font-bold text-emerald-600">{formatRupiah(calculatedActiveContract.totalTerbayar)}</span>
-                </div>
-                <div className="flex justify-between border-t pt-2 font-bold text-rose-700">
-                  <span>Sisa Saldo Tunggakan (Sisa Piutang):</span>
-                  <span>{formatRupiah(calculatedActiveContract.sisa)}</span>
+
+                {/* Contract Breakdown Card */}
+                <div className="space-y-2 p-3.5 bg-slate-50 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 rounded-xl font-mono text-xs text-slate-700 dark:text-slate-350">
+                  <div className="flex justify-between">
+                    <span>Anggota:</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-200">{calculatedActiveContract.mInfo?.nama}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Setoran Wajib Bulanan (1 Bulan):</span>
+                    <span className="font-bold text-emerald-700">{formatRupiah(calculatedActiveContract.contract.totalAngsuranPerBulan)}</span>
+                  </div>
+                  {payOption === 'dobel' && (
+                    <div className="flex justify-between text-indigo-700 dark:text-indigo-400 font-bold bg-indigo-50/70 dark:bg-indigo-950/40 p-2 rounded-lg border border-indigo-200 dark:border-indigo-900">
+                      <span>Total Tagihan 2 Bulan (Tunggakan + Berjalan):</span>
+                      <span className="font-mono text-sm">{formatRupiah(calculatedActiveContract.contract.totalAngsuranPerBulan * 2)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between">
+                    <span>Total Sudah Dibayar:</span>
+                    <span className="font-bold text-emerald-600">{formatRupiah(calculatedActiveContract.totalTerbayar)}</span>
+                  </div>
+                  <div className="flex justify-between border-t border-slate-200 dark:border-slate-800 pt-2">
+                    <span>Sisa Pinjaman Pokok:</span>
+                    <span className="font-bold text-rose-600">{formatRupiah(calculatedActiveContract.sisaPokok)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Jasa Bulan Berjalan:</span>
+                    <span className="font-bold text-amber-600">{formatRupiah(calculatedActiveContract.jasaBulanBerjalan)}</span>
+                  </div>
+                  <div className={`flex justify-between pt-2 border-t border-dashed font-bold ${
+                    payOption === 'lunas' 
+                      ? 'text-amber-700 dark:text-amber-300 bg-amber-100/70 dark:bg-amber-950/50 p-2 rounded-lg' 
+                      : payOption === 'dobel'
+                      ? 'text-indigo-700 dark:text-indigo-300 bg-indigo-100/70 dark:bg-indigo-950/50 p-2 rounded-lg'
+                      : 'text-slate-800 dark:text-slate-200'
+                  }`}>
+                    <span>
+                      {payOption === 'lunas' ? 'Total Nominal Bayar Lunas:' : payOption === 'dobel' ? 'Total Bayar 2 Bulan (Tercatat 2x):' : 'Standar Angsuran 1 Bulan:'}
+                    </span>
+                    <span className="text-sm font-black">
+                      {formatRupiah(payOption === 'lunas' ? calculatedActiveContract.nominalBayarLunas : payOption === 'dobel' ? calculatedActiveContract.contract.totalAngsuranPerBulan * 2 : calculatedActiveContract.contract.totalAngsuranPerBulan)}
+                    </span>
+                  </div>
+                  {payOption === 'dobel' && (
+                    <p className="text-[11px] font-sans text-indigo-700 dark:text-indigo-400 font-medium leading-relaxed pt-1">
+                      💡 <b>Opsi 2 Bulan Sekaligus:</b> Sistem akan mencatat <b>dua kali angsuran</b> resmi:
+                      <br />• Angsuran Ke-{bulanKe} (Tunggakan Bulan Kemarin): {formatRupiah(calculatedActiveContract.contract.totalAngsuranPerBulan)}
+                      <br />• Angsuran Ke-{bulanKe + 1} (Bulan Berjalan): {formatRupiah(calculatedActiveContract.contract.totalAngsuranPerBulan)}
+                    </p>
+                  )}
+                  {payOption === 'lunas' && (
+                    <p className="text-[11px] font-sans text-amber-700 dark:text-amber-400 font-medium leading-relaxed pt-1">
+                      💡 <b>Opsi Bayar Lunas:</b> Mencakup Sisa Pokok ({formatRupiah(calculatedActiveContract.sisaPokok)}) + Jasa Bulan Berjalan ({formatRupiah(calculatedActiveContract.jasaBulanBerjalan)}). Pinjaman akan dinyatakan LUNAS dan bebas dari jasa bulan-bulan berikutnya.
+                    </p>
+                  )}
                 </div>
               </div>
             )}
@@ -4896,15 +6842,22 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
             </div>
 
             <div className="space-y-1">
-              <label className="text-xs font-semibold text-slate-500 dark:text-slate-450 label-id">Jumlah Angsuran (Rp) <span className="text-[10px] text-slate-400 font-normal">(Kosongkan jika bayar penuh bulanan)</span></label>
+              <label className="text-xs font-semibold text-slate-500 dark:text-slate-450 label-id flex justify-between">
+                <span>Jumlah Angsuran (Rp)</span>
+                {payOption === 'lunas' && <span className="text-[10px] text-amber-600 font-bold">Bayar Lunas Aktif</span>}
+              </label>
               <div className="relative">
                 <span className="absolute left-3 top-2.5 text-sm text-slate-400 font-medium">Rp</span>
                 <input 
-                  type="number"
-                  placeholder={calculatedActiveContract ? String(calculatedActiveContract.contract.totalAngsuranPerBulan) : 'Contoh: 1000000'}
+                  type="text"
+                  placeholder={calculatedActiveContract ? formatInputRupiah(String(payOption === 'lunas' ? calculatedActiveContract.nominalBayarLunas : calculatedActiveContract.contract.totalAngsuranPerBulan)) : 'Contoh: 1.000.000'}
                   value={customAmount}
-                  onChange={(e) => setCustomAmount(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-mono font-bold"
+                  onChange={(e) => setCustomAmount(formatInputRupiah(e.target.value))}
+                  className={`w-full pl-9 pr-4 py-2 border rounded-lg bg-slate-50 dark:bg-slate-900 font-mono font-bold ${
+                    payOption === 'lunas'
+                      ? 'border-amber-400 text-amber-700 dark:text-amber-300 bg-amber-50/50'
+                      : 'border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200'
+                  }`}
                 />
               </div>
             </div>
@@ -4922,9 +6875,13 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
 
             <button 
               type="submit"
-              className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-semibold py-2 rounded-lg text-sm transition cursor-pointer shadow-sm animate-hover"
+              className={`w-full font-bold py-2.5 rounded-xl text-sm transition cursor-pointer shadow-sm animate-hover flex items-center justify-center gap-1.5 ${
+                payOption === 'lunas'
+                  ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                  : 'bg-emerald-700 hover:bg-emerald-800 text-white'
+              }`}
             >
-              Bukukan Transaksi Angsuran
+              {payOption === 'lunas' ? '⚡ Bukukan Pelunasan Lunas Pinjaman' : 'Bukukan Transaksi Angsuran'}
             </button>
           </form>
         </div>
@@ -4966,7 +6923,7 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
                   angsuran.sort((a,b)=>b.tanggal.localeCompare(a.tanggal)).map((a) => {
                     const m = members.find(mem => mem.id === a.anggotaId);
                     const pContract = pinjaman.find(p => p.id === a.pinjamanId);
-                    const remaining = pContract ? getRemainingPrincipal(a.pinjamanId, pContract.totalWajibBayar) : 0;
+                    const remaining = pContract ? calculateHistoricalLoanOutstanding(pContract, a, angsuran) : 0;
                     
                     return (
                       <tr key={a.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
@@ -5001,9 +6958,24 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
                             {onDeleteAngsuran && (
                               <button 
                                 onClick={() => {
-                                  if (window.confirm("Apakah Anda yakin ingin menghapus catatan angsuran ini? Tindakan ini akan menghapus data permanen dari database.")) {
-                                    onDeleteAngsuran(a.id);
-                                  }
+                                  const m = members.find(mem => mem.id === a.anggotaId);
+                                  setDeleteModalState({
+                                    isOpen: true,
+                                    itemType: 'Catatan Angsuran',
+                                    itemName: `Angsuran Bulan Ke-${a.bulanKe} - ${formatRupiah(a.jumlahBayar)}`,
+                                    itemDetails: [
+                                      { label: 'Nama Anggota', value: m ? `${m.nama} (${m.noAnggota})` : '-' },
+                                      { label: 'Tanggal Bayar', value: a.tanggal },
+                                      { label: 'Angsuran Bulan Ke', value: String(a.bulanKe) },
+                                      { label: 'Jumlah Bayar', value: formatRupiah(a.jumlahBayar), isHighlight: true },
+                                      { label: 'Rincian Pokok/Jasa', value: `Pokok: ${formatRupiah(a.pokokBayar || 0)} | Jasa: ${formatRupiah(a.jasaBayar || 0)}` },
+                                      { label: 'Keterangan', value: a.keterangan || '-' }
+                                    ],
+                                    warningMessage: 'Menghapus angsuran ini akan mengembalikan sisa pokok pinjaman dan memperbarui saldo kas koperasi secara otomatis.',
+                                    onConfirm: () => {
+                                      onDeleteAngsuran(a.id);
+                                    }
+                                  });
                                 }}
                                 className="p-1 px-2 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/20 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-350 rounded text-[10px] font-sans font-bold cursor-pointer transition flex items-center gap-0.5"
                                 title="Hapus Catatan Angsuran"
@@ -5132,7 +7104,7 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
                       <span className="w-28 text-slate-450 shrink-0">Tunggakan Sisa</span>
                       <span className="w-4 text-center shrink-0">:</span>
                       <span className="flex-1 text-slate-800 dark:text-slate-200 font-bold">
-                        {formatRupiah(pinjaman.find(p => p.id === previewReceipt.pinjamanId) ? getRemainingPrincipal(previewReceipt.pinjamanId, pinjaman.find(p => p.id === previewReceipt.pinjamanId)!.totalWajibBayar) : 0)}
+                        {formatRupiah(pinjaman.find(p => p.id === previewReceipt.pinjamanId) ? calculateHistoricalLoanOutstanding(pinjaman.find(p => p.id === previewReceipt.pinjamanId)!, previewReceipt, angsuran) : 0)}
                       </span>
                     </div>
 
@@ -5184,12 +7156,42 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
               </div>
 
               {/* Modal Footer with Actions */}
-              <div className="px-6 py-4 bg-slate-50 dark:bg-slate-900/40 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-3 text-xs">
+              <div className="px-6 py-4 bg-slate-50 dark:bg-slate-900/40 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-end gap-2.5 text-xs">
                 <button 
                   onClick={() => setPreviewReceipt(null)}
                   className="px-4 py-2 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold transition cursor-pointer"
                 >
                   Kembali
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => {
+                    const m = members.find(mem => mem.id === previewReceipt.anggotaId);
+                    if (m) {
+                      const resume = calculateMemberLedgerResume(previewReceipt.anggotaId, simpanan, pinjaman, angsuran);
+                      const url = createWhatsAppThankYouUrl(
+                        m.noHp,
+                        m.nama,
+                        m.noAnggota,
+                        setup?.namaKoperasi || 'KOPERASI',
+                        `Angsuran Pinjaman Bulan Ke-${previewReceipt.bulanKe}`,
+                        previewReceipt.jumlahBayar,
+                        previewReceipt.tanggal,
+                        `TRX-${previewReceipt.id.toUpperCase()}`,
+                        previewReceipt.keterangan,
+                        resume,
+                        previewReceipt.anggotaId
+                      );
+                      window.open(url, '_blank');
+                    } else {
+                      alert('Data anggota tidak ditemukan!');
+                    }
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-1.5 transition shadow-sm cursor-pointer"
+                  title="Kirim Ucapan Terima Kasih via WhatsApp"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  WA Terima Kasih
                 </button>
                 <button 
                   onClick={() => {
@@ -5206,6 +7208,22 @@ export function AngsuranView({ setup, members, pinjaman, angsuran, onAddAngsuran
           </div>
         )}
       </AnimatePresence>
+
+      <ConfirmDeleteModal
+        isOpen={!!deleteModalState?.isOpen}
+        title={deleteModalState ? `Hapus ${deleteModalState.itemType}` : undefined}
+        itemType={deleteModalState?.itemType}
+        itemName={deleteModalState?.itemName}
+        itemDetails={deleteModalState?.itemDetails}
+        warningMessage={deleteModalState?.warningMessage}
+        onConfirm={async () => {
+          if (deleteModalState?.onConfirm) {
+            await deleteModalState.onConfirm();
+          }
+          setDeleteModalState(null);
+        }}
+        onClose={() => setDeleteModalState(null)}
+      />
     </div>
   );
 }

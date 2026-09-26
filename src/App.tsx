@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Member, Simpanan, Pinjaman, Angsuran, PendapatanLain, BebanKoperasi, KoperasiSetup, ManasukaBungaLog, Pembelian, PiutangWarung, Pengumuman, PengajuanPinjaman, WarungBarang, PengurusPengawas, GaleriKoperasi, RekeningNeraca, PembayaranPending } from './types';
-import { initialMembers, initialSimpanan, initialPinjaman, initialAngsuran, initialPendapatan, initialBeban, initialSetup, initialPembelian, initialPiutangWarung, initialAnnouncements, initialPengajuanPinjaman, initialWarungBarang, initialPengurusPengawas, initialGaleriKoperasi, initialRekeningNeraca, initialPembayaranPending } from './dummyData';
+import { sortMembersNaturally, calculateLoanOutstanding, calculateAngsuranPrincipal, calculateAngsuranInterest, calculateKasKoperasi } from './utils/finance';
+import { Member, Simpanan, Pinjaman, Angsuran, PendapatanLain, BebanKoperasi, KoperasiSetup, ManasukaBungaLog, Pembelian, PiutangWarung, Pengumuman, PengajuanPinjaman, WarungBarang, PengurusPengawas, GaleriKoperasi, RekeningNeraca, PembayaranPending, UserAccount, SecurityLog, ItemAnggaranRAPBK, RAPBKSetting, WhatsAppLog, SHUDistribution } from './types';
+import { initialMembers, initialSimpanan, initialPinjaman, initialAngsuran, initialPendapatan, initialBeban, initialSetup, initialPembelian, initialPiutangWarung, initialAnnouncements, initialPengajuanPinjaman, initialWarungBarang, initialPengurusPengawas, initialGaleriKoperasi, initialRekeningNeraca, initialPembayaranPending, initialUserAccounts, initialSecurityLogs, initialRAPBKSettings, initialAnggaranRAPBK, initialWhatsAppLogs } from './dummyData';
 import { 
   fetchKoperasiSetup, 
   saveKoperasiSetup, 
@@ -8,11 +9,14 @@ import {
   saveCollectionItem, 
   deleteCollectionItem, 
   seedCollection,
-  clearCollection
+  clearCollection,
+  subscribeCollection
 } from './utils/firebaseStorage';
-import { LoginScreen, ArusKasView, ProfilKoperasiView } from './components/AdminViews';
+import { LoginScreen, ProfilKoperasiView } from './components/AdminViews';
+import { ArusKasView } from './components/ArusKasView';
 import { AnggotaView, PinjamanView } from './components/CoreViews';
 import { KasMasukView } from './components/KasMasukView';
+import { KasKeluarView } from './components/KasKeluarView';
 import { DashboardView, LaporanView } from './components/LaporanViews';
 import { PembelianView } from './components/PembelianView';
 import { PengingatView } from './components/PengingatView';
@@ -21,11 +25,22 @@ import { PortalKoperasi, MemberDashboardView } from './components/PortalKoperasi
 import { AdminWarungView } from './components/AdminWarungView';
 import { AdminPengurusView } from './components/AdminPengurusView';
 import { AdminGaleriView } from './components/AdminGaleriView';
-import { formatRupiah } from './utils/finance';
+import { AdminUserManagementView } from './components/AdminUserManagementView';
+import { AdminSecurityLogsView } from './components/AdminSecurityLogsView';
+import { AdminAnggaranView } from './components/AdminAnggaranView';
+import { CatatanKhususPengurusView } from './components/CatatanKhususPengurusView';
+import { CalculatorPopup } from './components/CalculatorPopup';
+import { SplashScreen } from './components/SplashScreen';
+import { GlobalSearchModal } from './components/GlobalSearchModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { IdleTimeoutHandler } from './components/IdleTimeoutHandler';
+import { Routes, Route, Navigate, useNavigate, useLocation, Link } from 'react-router-dom';
 import { 
-  Building, LayoutDashboard, Users, Wallet, HandCoins, CheckCircle2, Check,
-  TrendingUp, Scale, Sun, Moon, LogOut, HeartHandshake, UserCog, Menu, X, ShoppingCart, Lock, Bell, Megaphone,
-  Eye, EyeOff, Store, Image as ImageIcon
+  Building, LayoutDashboard, Users, Wallet, HandCoins, CheckCircle2, 
+  TrendingUp, TrendingDown, Scale, Sun, Moon, LogOut, HeartHandshake, UserCog, Menu, X, ShoppingCart, Lock, Bell, Megaphone,
+  Eye, EyeOff, Store, Image as ImageIcon, KeyRound, ShieldCheck, Calculator, Search, LogIn, Globe, Target,
+  FileSpreadsheet
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -150,10 +165,10 @@ export default function App() {
     return localStorage.getItem('koperasi_session_active') === 'true';
   });
 
-  const [userRole, setUserRole] = useState<'admin' | 'member' | null>(() => {
+  const [userRole, setUserRole] = useState<'admin' | 'pengawas' | 'karyawan_warung' | 'member' | null>(() => {
     const active = localStorage.getItem('koperasi_session_active') === 'true';
     if (!active) return null;
-    return (localStorage.getItem('koperasi_user_role') as 'admin' | 'member') || 'admin';
+    return (localStorage.getItem('koperasi_user_role') as 'admin' | 'pengawas' | 'karyawan_warung' | 'member') || 'admin';
   });
 
   const [loggedMember, setLoggedMember] = useState<Member | null>(() => {
@@ -168,31 +183,161 @@ export default function App() {
     return null;
   });
 
-  const handleLoginSuccess = (role: 'admin' | 'member', member?: Member) => {
+  const [currentUserAccount, setCurrentUserAccount] = useState<UserAccount | null>(() => {
+    const accStr = localStorage.getItem('koperasi_logged_user_account');
+    if (accStr) {
+      try {
+        return JSON.parse(accStr);
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  });
+
+  // Idle timeout notification state
+  const [idleLogoutNotice, setIdleLogoutNotice] = useState<string | null>(() => {
+    return sessionStorage.getItem('koperasi_idle_notice') || null;
+  });
+
+  useEffect(() => {
+    if (idleLogoutNotice) {
+      const timer = setTimeout(() => {
+        setIdleLogoutNotice(null);
+        try {
+          sessionStorage.removeItem('koperasi_idle_notice');
+        } catch (e) {}
+      }, 10000);
+      return () => clearTimeout(timer);
+    }
+  }, [idleLogoutNotice]);
+
+  const handleLoginSuccess = (role: 'admin' | 'pengawas' | 'karyawan_warung' | 'member', member?: Member, userAcc?: UserAccount) => {
     setIsLoggedIn(true);
     setUserRole(role);
+    setIdleLogoutNotice(null);
+    try {
+      sessionStorage.removeItem('koperasi_idle_notice');
+      localStorage.setItem('koperasi_last_active_time', String(Date.now()));
+    } catch (e) {}
     localStorage.setItem('koperasi_session_active', 'true');
     localStorage.setItem('koperasi_user_role', role);
+
+    if (userAcc) {
+      setCurrentUserAccount(userAcc);
+      localStorage.setItem('koperasi_logged_user_account', JSON.stringify(userAcc));
+    } else {
+      setCurrentUserAccount(null);
+      localStorage.removeItem('koperasi_logged_user_account');
+    }
+
     if (role === 'member' && member) {
       setLoggedMember(member);
       localStorage.setItem('koperasi_logged_member', JSON.stringify(member));
+
+      // Record member login security log
+      const memName = member.nama || userAcc?.nama || 'Anggota Koperasi';
+      const memNo = member.noAnggota || userAcc?.username || '-';
+      handleAddSecurityLog({
+        userId: member.id || userAcc?.id || 'member',
+        userNama: memName,
+        role: 'member',
+        action: 'LOGIN_PORTAL_ANGGOTA',
+        category: 'Autentikasi',
+        severity: 'info',
+        status: 'SUCCESS',
+        description: `Anggota ${memName} (No. Anggota: ${memNo}) berhasil login ke Portal Layanan Mandiri Koperasi.`,
+        ipAddress: '182.253.' + Math.floor(Math.random() * 200 + 10) + '.' + Math.floor(Math.random() * 200 + 10),
+        userAgent: navigator.userAgent || 'Mozilla/5.0 (Mobile/Web Browser)',
+        metadata: {
+          noAnggota: memNo,
+          anggotaId: member.id || userAcc?.anggotaId,
+          loginMethod: 'Portal Mandiri Koperasi'
+        }
+      });
+      navigate('/member');
     } else {
       setLoggedMember(null);
       localStorage.removeItem('koperasi_logged_member');
+      if (role === 'karyawan_warung') {
+        navigate('/aruskas');
+      } else {
+        navigate('/admin');
+      }
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = (reason?: string | React.MouseEvent) => {
+    const isIdle = typeof reason === 'string' && reason === 'idle';
+    if (isIdle) {
+      const noticeText = 'Sesi Anda telah berakhir otomatis ke Portal Utama karena tidak ada aktivitas (idle) selama 2 menit demi menjaga keamanan akun dan transaksi koperasi.';
+      setIdleLogoutNotice(noticeText);
+      try {
+        sessionStorage.setItem('koperasi_idle_notice', noticeText);
+      } catch (e) {}
+
+      // Add security audit log
+      if (isLoggedIn) {
+        const uId = loggedMember?.id || currentUserAccount?.id || 'active-user';
+        const uName = loggedMember?.nama || currentUserAccount?.nama || (userRole ? userRole.toUpperCase() : 'Pengguna');
+        handleAddSecurityLog({
+          userId: uId,
+          userNama: uName,
+          role: userRole || 'admin',
+          action: 'LOGOUT_IDLE_TIMEOUT',
+          category: 'Autentikasi',
+          severity: 'warning',
+          status: 'SUCCESS',
+          description: `Sesi ${uName} otomatis ditutup dan dialihkan ke Portal Utama karena tidak ada aktivitas (idle) selama 2 menit.`,
+          ipAddress: '182.253.' + Math.floor(Math.random() * 200 + 10) + '.' + Math.floor(Math.random() * 200 + 10),
+          userAgent: navigator.userAgent || 'Mozilla/5.0',
+          metadata: {
+            timeoutMinutes: 2,
+            logoutReason: 'idle_inactivity'
+          }
+        });
+      }
+    } else {
+      setIdleLogoutNotice(null);
+      try {
+        sessionStorage.removeItem('koperasi_idle_notice');
+      } catch (e) {}
+    }
+
     setIsLoggedIn(false);
     setUserRole(null);
     setLoggedMember(null);
+    setCurrentUserAccount(null);
     localStorage.removeItem('koperasi_session_active');
     localStorage.removeItem('koperasi_user_role');
     localStorage.removeItem('koperasi_logged_member');
+    localStorage.removeItem('koperasi_logged_user_account');
+    localStorage.removeItem('koperasi_last_active_time');
+    sessionStorage.removeItem('koperasi_session_active');
+    navigate('/portal');
+  };
+
+  // Helper to safely load cached data or use fallback
+  const getStoredOrFallback = <T,>(key: string, fallback: T): T => {
+    try {
+      const item = localStorage.getItem(key);
+      return item ? JSON.parse(item) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  // Safe localStorage writer to prevent QuotaExceededError crashes
+  const safeSetItem = (key: string, value: any) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      console.warn(`Gagal menyimpan cache ${key}:`, e);
+    }
   };
 
   // Centralised Financial Stores connected to Cloud Firestore (with LocalStorage fallback)
-  const [setup, setSetup] = useState<KoperasiSetup>(initialSetup);
+  const [setup, setSetup] = useState<KoperasiSetup>(() => getStoredOrFallback('kop_setup', initialSetup));
 
   // Dynamic branding color application effect
   useEffect(() => {
@@ -203,25 +348,80 @@ export default function App() {
     });
   }, [setup?.warnaUtama]);
 
-  const [members, setMembers] = useState<Member[]>([]);
-  const [simpanan, setSimpanan] = useState<Simpanan[]>([]);
-  const [pinjaman, setPinjaman] = useState<Pinjaman[]>([]);
-  const [angsuran, setAngsuran] = useState<Angsuran[]>([]);
-  const [income, setIncome] = useState<PendapatanLain[]>([]);
-  const [expenses, setExpenses] = useState<BebanKoperasi[]>([]);
-  const [pembelian, setPembelian] = useState<Pembelian[]>([]);
-  const [piutangWarung, setPiutangWarung] = useState<PiutangWarung[]>([]);
-  const [announcements, setAnnouncements] = useState<Pengumuman[]>([]);
-  const [pengajuanPinjaman, setPengajuanPinjaman] = useState<PengajuanPinjaman[]>([]);
-  const [pembayaranPending, setPembayaranPending] = useState<PembayaranPending[]>([]);
-  const [warungBarang, setWarungBarang] = useState<WarungBarang[]>([]);
-  const [pengurusPengawas, setPengurusPengawas] = useState<PengurusPengawas[]>([]);
-  const [galeriKoperasi, setGaleriKoperasi] = useState<GaleriKoperasi[]>([]);
-  const [rekening, setRekening] = useState<RekeningNeraca[]>([]);
+  // Dynamic branding title & favicon effect
+  useEffect(() => {
+    const appName = setup?.namaKoperasi || "Koperasi Dana Segar";
+    document.title = `${appName} - Sistem Simpan Pinjam & Akuntansi`;
+
+    const faviconEl = document.querySelector("link[rel*='icon']") as HTMLLinkElement;
+    if (faviconEl) {
+      if (setup?.logoUrl && (setup.logoUrl.startsWith('http') || setup.logoUrl.startsWith('data:image'))) {
+        faviconEl.href = setup.logoUrl;
+      } else if (setup?.logoUrl && setup.logoUrl !== '🌱' && setup.logoUrl.trim().length <= 4) {
+        const svgUri = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="80">${encodeURIComponent(setup.logoUrl)}</text></svg>`;
+        faviconEl.href = svgUri;
+      } else {
+        faviconEl.href = '/favicon.svg';
+      }
+    }
+  }, [setup?.namaKoperasi, setup?.logoUrl]);
+
+  const [members, setMembers] = useState<Member[]>(() => getStoredOrFallback('kop_members', initialMembers));
+  const [simpanan, setSimpanan] = useState<Simpanan[]>(() => getStoredOrFallback('kop_simpanan', initialSimpanan));
+  const [pinjaman, setPinjaman] = useState<Pinjaman[]>(() => getStoredOrFallback('kop_pinjaman', initialPinjaman));
+  const [angsuran, setAngsuran] = useState<Angsuran[]>(() => getStoredOrFallback('kop_angsuran', initialAngsuran));
+  const [income, setIncome] = useState<PendapatanLain[]>(() => getStoredOrFallback('kop_income', initialPendapatan));
+  const [expenses, setExpenses] = useState<BebanKoperasi[]>(() => getStoredOrFallback('kop_expenses', initialBeban));
+  const [pembelian, setPembelian] = useState<Pembelian[]>(() => getStoredOrFallback('kop_pembelian', initialPembelian));
+  const [piutangWarung, setPiutangWarung] = useState<PiutangWarung[]>(() => getStoredOrFallback('kop_piutang_warung', initialPiutangWarung));
+  const [announcements, setAnnouncements] = useState<Pengumuman[]>(() => getStoredOrFallback('kop_announcements', initialAnnouncements));
+  const [pengajuanPinjaman, setPengajuanPinjaman] = useState<PengajuanPinjaman[]>(() => getStoredOrFallback('kop_pengajuan_pinjaman', initialPengajuanPinjaman));
+  const [pembayaranPending, setPembayaranPending] = useState<PembayaranPending[]>(() => getStoredOrFallback('kop_pembayaran_pending', initialPembayaranPending));
+  const [warungBarang, setWarungBarang] = useState<WarungBarang[]>(() => getStoredOrFallback('kop_warung_barang', initialWarungBarang));
+  const [pengurusPengawas, setPengurusPengawas] = useState<PengurusPengawas[]>(() => getStoredOrFallback('kop_pengurus_pengawas', initialPengurusPengawas));
+  const [galeriKoperasi, setGaleriKoperasi] = useState<GaleriKoperasi[]>(() => getStoredOrFallback('kop_galeri_koperasi', initialGaleriKoperasi));
+  const [rekening, setRekening] = useState<RekeningNeraca[]>(() => getStoredOrFallback('kop_rekening', initialRekeningNeraca));
+  const [userAccounts, setUserAccounts] = useState<UserAccount[]>(() => getStoredOrFallback('kop_user_accounts', initialUserAccounts));
+  const [securityLogs, setSecurityLogs] = useState<SecurityLog[]>(() => getStoredOrFallback('kop_security_logs', initialSecurityLogs));
+  const [anggaranRAPBK, setAnggaranRAPBK] = useState<ItemAnggaranRAPBK[]>(() => getStoredOrFallback('kop_anggaran_rapbk', initialAnggaranRAPBK));
+  const [rapbkSettings, setRAPBKSettings] = useState<RAPBKSetting[]>(() => getStoredOrFallback('kop_rapbk_settings', initialRAPBKSettings));
+  const [whatsAppLogs, setWhatsAppLogs] = useState<WhatsAppLog[]>(() => getStoredOrFallback('kop_whatsapp_logs', initialWhatsAppLogs));
+  const [shuDistributions, setShuDistributions] = useState<SHUDistribution[]>(() => {
+    try {
+      const saved = localStorage.getItem('koperasi_shu_distributions');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const handleAddSHUDistribution = (dist: SHUDistribution) => {
+    setShuDistributions(prev => {
+      const updated = [dist, ...prev];
+      try {
+        localStorage.setItem('koperasi_shu_distributions', JSON.stringify(updated));
+      } catch (err) {
+        console.error("Gagal menyimpan distribusi SHU ke local storage", err);
+      }
+      return updated;
+    });
+  };
+
+  const sortedMembers = useMemo(() => sortMembersNaturally(members), [members]);
   const [isDbLoading, setIsDbLoading] = useState<boolean>(true);
+  const [showSplash, setShowSplash] = useState<boolean>(true);
 
   // Firestore & local storage loader effect
   useEffect(() => {
+    let isCancelled = false;
+
+    // Hard fallback safety to ensure loading state resolves even if Firestore connection hangs
+    const safetyLoadingTimer = setTimeout(() => {
+      if (!isCancelled) {
+        setIsDbLoading(false);
+      }
+    }, 3000);
+
     async function initAndSyncDatabase() {
       setIsDbLoading(true);
       try {
@@ -246,6 +446,11 @@ export default function App() {
           await seedCollection<PengurusPengawas>('pengurus_pengawas', initialPengurusPengawas);
           await seedCollection<GaleriKoperasi>('galeri_koperasi', initialGaleriKoperasi);
           await seedCollection<RekeningNeraca>('rekening', initialRekeningNeraca);
+          await seedCollection<UserAccount>('user_accounts', initialUserAccounts);
+          await seedCollection<SecurityLog>('security_logs', initialSecurityLogs);
+          await seedCollection<ItemAnggaranRAPBK>('anggaran_rapbk', initialAnggaranRAPBK);
+          await seedCollection<RAPBKSetting>('rapbk_settings', initialRAPBKSettings);
+          await seedCollection<WhatsAppLog>('whatsapp_logs', initialWhatsAppLogs);
 
           setSetup(initialSetup);
           setMembers(initialMembers);
@@ -263,9 +468,14 @@ export default function App() {
           setPengurusPengawas(initialPengurusPengawas);
           setGaleriKoperasi(initialGaleriKoperasi);
           setRekening(initialRekeningNeraca);
+          setUserAccounts(initialUserAccounts);
+          setSecurityLogs(initialSecurityLogs);
+          setAnggaranRAPBK(initialAnggaranRAPBK);
+          setRAPBKSettings(initialRAPBKSettings);
+          setWhatsAppLogs(initialWhatsAppLogs);
         } else {
           console.log("Found existing cloud data. Loading all cooperative records...");
-          const [dbMembers, dbSimpanan, dbPinjaman, dbAngsuran, dbIncome, dbExpenses, dbPembelian, dbPiutang, dbAnnouncements, dbPengajuan, dbWarungBarang, dbPengurus, dbGaleri, dbRekening, dbPembayaran] = await Promise.all([
+          const [dbMembers, dbSimpanan, dbPinjaman, dbAngsuran, dbIncome, dbExpenses, dbPembelian, dbPiutang, dbAnnouncements, dbPengajuan, dbWarungBarang, dbPengurus, dbGaleri, dbRekening, dbPembayaran, dbUserAccounts, dbSecurityLogs, dbAnggaran, dbRAPBKSettings, dbWhatsAppLogs] = await Promise.all([
             fetchCollection<Member>('members'),
             fetchCollection<Simpanan>('simpanan'),
             fetchCollection<Pinjaman>('pinjaman'),
@@ -280,67 +490,71 @@ export default function App() {
             fetchCollection<PengurusPengawas>('pengurus_pengawas'),
             fetchCollection<GaleriKoperasi>('galeri_koperasi'),
             fetchCollection<RekeningNeraca>('rekening'),
-            fetchCollection<PembayaranPending>('pembayaran_pending')
+            fetchCollection<PembayaranPending>('pembayaran_pending'),
+            fetchCollection<UserAccount>('user_accounts'),
+            fetchCollection<SecurityLog>('security_logs'),
+            fetchCollection<ItemAnggaranRAPBK>('anggaran_rapbk'),
+            fetchCollection<RAPBKSetting>('rapbk_settings'),
+            fetchCollection<WhatsAppLog>('whatsapp_logs')
           ]);
 
-          // Automatic cleanup of legacy dummy records on cold load
-          const hasDummyMembers = dbMembers && dbMembers.some(m => m.id === 'm-1' || m.id === 'm-2' || m.id === 'm-3' || m.id === 'm-4' || m.id === 'm-5');
-          if (hasDummyMembers) {
-            console.log("Detected legacy dummy records in cloud. Cleansing Firestore database for real empty deployment...");
+          setSetup(dbSetup);
+          setMembers(dbMembers && dbMembers.length > 0 ? dbMembers : (members.length > 0 ? members : initialMembers));
+          setSimpanan(dbSimpanan || []);
+          setPinjaman(dbPinjaman || []);
+          setAngsuran(dbAngsuran || []);
+          setIncome(dbIncome || []);
+          setExpenses(dbExpenses || []);
+          setPembelian(dbPembelian || []);
+          setPiutangWarung(dbPiutang || []);
+          setAnnouncements(dbAnnouncements || []);
+          setPengajuanPinjaman(dbPengajuan || []);
+          setPembayaranPending(dbPembayaran || []);
+          setWarungBarang(dbWarungBarang && dbWarungBarang.length > 0 ? dbWarungBarang : initialWarungBarang);
+          setPengurusPengawas(dbPengurus && dbPengurus.length > 0 ? dbPengurus : initialPengurusPengawas);
+          setGaleriKoperasi(dbGaleri && dbGaleri.length > 0 ? dbGaleri : initialGaleriKoperasi);
+          
+          const localSavedUsers = localStorage.getItem('kop_user_accounts');
+          let initialAccountsList: UserAccount[] = [];
+          if (dbUserAccounts && dbUserAccounts.length > 0) {
+            initialAccountsList = dbUserAccounts;
+          } else if (localSavedUsers) {
             try {
-              await clearCollection('members');
-              await clearCollection('simpanan');
-              await clearCollection('pinjaman');
-              await clearCollection('angsuran');
-              await clearCollection('income');
-              await clearCollection('expenses');
-              await clearCollection('pembelian');
-              await clearCollection('piutang_warung');
-              await clearCollection('announcements');
-              await clearCollection('pengajuan_pinjaman');
-              await clearCollection('warung_barang');
-              await clearCollection('pengurus_pengawas');
-              await clearCollection('galeri_koperasi');
-              await clearCollection('rekening');
-            } catch (clearErr) {
-              console.error("Error auto-clearing legacy dummy records:", clearErr);
+              initialAccountsList = JSON.parse(localSavedUsers);
+            } catch (e) {
+              initialAccountsList = initialUserAccounts;
             }
-
-            setSetup(dbSetup);
-            setMembers([]);
-            setSimpanan([]);
-            setPinjaman([]);
-            setAngsuran([]);
-            setIncome([]);
-            setExpenses([]);
-            setPembelian([]);
-            setPiutangWarung([]);
-            setAnnouncements([]);
-            setPengajuanPinjaman([]);
-            setWarungBarang(initialWarungBarang);
-            setPengurusPengawas(initialPengurusPengawas);
-            setGaleriKoperasi(initialGaleriKoperasi);
-            setRekening([]);
           } else {
-            setSetup(dbSetup);
-            setMembers(dbMembers || []);
-            setSimpanan(dbSimpanan || []);
-            setPinjaman(dbPinjaman || []);
-            setAngsuran(dbAngsuran || []);
-            setIncome(dbIncome || []);
-            setExpenses(dbExpenses || []);
-            setPembelian(dbPembelian || []);
-            setPiutangWarung(dbPiutang || []);
-            setAnnouncements(dbAnnouncements || []);
-            setPengajuanPinjaman(dbPengajuan || []);
-            setPembayaranPending(dbPembayaran || []);
-            setWarungBarang(dbWarungBarang && dbWarungBarang.length > 0 ? dbWarungBarang : initialWarungBarang);
-            setPengurusPengawas(dbPengurus && dbPengurus.length > 0 ? dbPengurus : initialPengurusPengawas);
-            setGaleriKoperasi(dbGaleri && dbGaleri.length > 0 ? dbGaleri : initialGaleriKoperasi);
+            initialAccountsList = initialUserAccounts;
+          }
+
+            // Ensure the main admin account is ALWAYS present in userAccounts so it is visible in the user list & password change works
+            const hasAdmin = initialAccountsList.some((u: UserAccount) => u.username.toLowerCase() === 'admin' || u.role === 'admin');
+            if (!hasAdmin) {
+              const defaultAdmin: UserAccount = {
+                id: 'usr-admin-1',
+                username: 'admin',
+                password: 'd4n45egar',
+                role: 'admin',
+                nama: 'Pengurus Utama / Admin',
+                posisiJabatan: 'Ketua & System Admin',
+                isActive: true,
+                createdAt: new Date().toISOString().substring(0, 10)
+              };
+              initialAccountsList = [defaultAdmin, ...initialAccountsList];
+              saveCollectionItem<UserAccount>('user_accounts', defaultAdmin).catch(err => console.warn(err));
+            }
+            setUserAccounts(initialAccountsList);
+
+            setSecurityLogs(dbSecurityLogs && dbSecurityLogs.length > 0 ? dbSecurityLogs : initialSecurityLogs);
             
             const rawRekening = dbRekening && dbRekening.length > 0 ? dbRekening : initialRekeningNeraca;
             const filteredRek = rawRekening.filter(r => !['1201', '1202', '1203', '1204', '2201', '3105'].includes(r.kode));
             setRekening(filteredRek);
+
+            setAnggaranRAPBK(dbAnggaran && dbAnggaran.length > 0 ? dbAnggaran : initialAnggaranRAPBK);
+            setRAPBKSettings(dbRAPBKSettings && dbRAPBKSettings.length > 0 ? dbRAPBKSettings : initialRAPBKSettings);
+            setWhatsAppLogs(dbWhatsAppLogs && dbWhatsAppLogs.length > 0 ? dbWhatsAppLogs : initialWhatsAppLogs);
 
             // Clean up from Firestore if they were loaded from database
             if (dbRekening && dbRekening.length > 0) {
@@ -350,8 +564,7 @@ export default function App() {
               }
             }
           }
-        }
-      } catch (err) {
+        } catch (err) {
         console.error("Cloud database syncing failed, utilizing local storage backup", err);
         const dataSetup = localStorage.getItem('kop_setup');
         const dataMembers = localStorage.getItem('kop_members');
@@ -369,6 +582,11 @@ export default function App() {
         const dataPengurus = localStorage.getItem('kop_pengurus_pengawas');
         const dataGaleri = localStorage.getItem('kop_galeri_koperasi');
         const dataRekening = localStorage.getItem('kop_rekening');
+        const dataSecurityLogs = localStorage.getItem('kop_security_logs');
+        const dataUserAccounts = localStorage.getItem('kop_user_accounts');
+        const dataAnggaran = localStorage.getItem('kop_anggaran_rapbk');
+        const dataRAPBKSettings = localStorage.getItem('kop_rapbk_settings');
+        const dataWhatsAppLogs = localStorage.getItem('kop_whatsapp_logs');
 
         if (dataSetup) setSetup(JSON.parse(dataSetup));
         if (dataMembers) setMembers(JSON.parse(dataMembers));
@@ -385,54 +603,222 @@ export default function App() {
         if (dataWarungBarang) setWarungBarang(JSON.parse(dataWarungBarang));
         if (dataPengurus) setPengurusPengawas(JSON.parse(dataPengurus));
         if (dataGaleri) setGaleriKoperasi(JSON.parse(dataGaleri));
+        if (dataSecurityLogs) setSecurityLogs(JSON.parse(dataSecurityLogs));
+        if (dataUserAccounts) setUserAccounts(JSON.parse(dataUserAccounts));
+        if (dataAnggaran) setAnggaranRAPBK(JSON.parse(dataAnggaran));
+        if (dataRAPBKSettings) setRAPBKSettings(JSON.parse(dataRAPBKSettings));
+        if (dataWhatsAppLogs) setWhatsAppLogs(JSON.parse(dataWhatsAppLogs));
         if (dataRekening) {
           const parsed = JSON.parse(dataRekening) as RekeningNeraca[];
           setRekening(parsed.filter(r => !['1201', '1202', '1203', '1204', '2201', '3105'].includes(r.kode)));
         }
       } finally {
+        clearTimeout(safetyLoadingTimer);
         setIsDbLoading(false);
       }
     }
     initAndSyncDatabase();
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(safetyLoadingTimer);
+    };
   }, []);
 
-  // Sync to localStorage as progressive web offline backup
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_setup', JSON.stringify(setup)); }, [setup, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_members', JSON.stringify(members)); }, [members, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_simpanan', JSON.stringify(simpanan)); }, [simpanan, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_pinjaman', JSON.stringify(pinjaman)); }, [pinjaman, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_angsuran', JSON.stringify(angsuran)); }, [angsuran, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_income', JSON.stringify(income)); }, [income, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_expenses', JSON.stringify(expenses)); }, [expenses, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_pembelian', JSON.stringify(pembelian)); }, [pembelian, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_piutang_warung', JSON.stringify(piutangWarung)); }, [piutangWarung, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_announcements', JSON.stringify(announcements)); }, [announcements, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_pengajuan_pinjaman', JSON.stringify(pengajuanPinjaman)); }, [pengajuanPinjaman, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_pembayaran_pending', JSON.stringify(pembayaranPending)); }, [pembayaranPending, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_warung_barang', JSON.stringify(warungBarang)); }, [warungBarang, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_pengurus_pengawas', JSON.stringify(pengurusPengawas)); }, [pengurusPengawas, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_galeri_koperasi', JSON.stringify(galeriKoperasi)); }, [galeriKoperasi, isDbLoading]);
-  useEffect(() => { if (!isDbLoading) localStorage.setItem('kop_rekening', JSON.stringify(rekening)); }, [rekening, isDbLoading]);
+  // Real-time synchronization for dynamic member activities (Setoran Mandiri & Pengajuan Pinjaman)
+  // Ensures payments submitted by members on mobile/portal immediately appear on pengurus screens
+  useEffect(() => {
+    if (isDbLoading) return;
 
-  // Active Routing state
-  const [activeTab, setActiveTab ] = useState<'dashboard' | 'anggota' | 'kasmasuk' | 'pinjaman' | 'aruskas' | 'pembelian' | 'laporan' | 'profil' | 'pengingat' | 'pengumuman' | 'warung' | 'pengurus' | 'galeri'>('dashboard');
+    const unsubPembayaran = subscribeCollection<PembayaranPending>('pembayaran_pending', (items) => {
+      if (items && Array.isArray(items)) {
+        setPembayaranPending(items);
+        try {
+          localStorage.setItem('kop_pembayaran_pending', JSON.stringify(items));
+        } catch (e) {}
+      }
+    });
+
+    const unsubPengajuan = subscribeCollection<PengajuanPinjaman>('pengajuan_pinjaman', (items) => {
+      if (items && Array.isArray(items)) {
+        setPengajuanPinjaman(items);
+        try {
+          localStorage.setItem('kop_pengajuan_pinjaman', JSON.stringify(items));
+        } catch (e) {}
+      }
+    });
+
+    return () => {
+      unsubPembayaran();
+      unsubPengajuan();
+    };
+  }, [isDbLoading]);
+
+  // Sync to localStorage as progressive web offline backup safely
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_setup', setup); }, [setup, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_members', members); }, [members, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_simpanan', simpanan); }, [simpanan, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_pinjaman', pinjaman); }, [pinjaman, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_angsuran', angsuran); }, [angsuran, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_income', income); }, [income, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_expenses', expenses); }, [expenses, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_pembelian', pembelian); }, [pembelian, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_piutang_warung', piutangWarung); }, [piutangWarung, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_announcements', announcements); }, [announcements, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_pengajuan_pinjaman', pengajuanPinjaman); }, [pengajuanPinjaman, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_pembayaran_pending', pembayaranPending); }, [pembayaranPending, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_warung_barang', warungBarang); }, [warungBarang, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_pengurus_pengawas', pengurusPengawas); }, [pengurusPengawas, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_galeri_koperasi', galeriKoperasi); }, [galeriKoperasi, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_rekening', rekening); }, [rekening, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_security_logs', securityLogs); }, [securityLogs, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_user_accounts', userAccounts); }, [userAccounts, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_anggaran_rapbk', anggaranRAPBK); }, [anggaranRAPBK, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_rapbk_settings', rapbkSettings); }, [rapbkSettings, isDbLoading]);
+  useEffect(() => { if (!isDbLoading) safeSetItem('kop_whatsapp_logs', whatsAppLogs); }, [whatsAppLogs, isDbLoading]);
+
+  // Multi-Page Routing Hooks
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  type TabId = 'dashboard' | 'anggota' | 'kasmasuk' | 'kaskeluar' | 'pinjaman' | 'aruskas' | 'pembelian' | 'laporan' | 'anggaran' | 'catatan_pengurus' | 'profil' | 'pengingat' | 'pengumuman' | 'warung' | 'pengurus' | 'galeri' | 'user_mgmt' | 'security_logs';
+
+  const getActiveTabFromPath = (pathname: string): TabId => {
+    const p = pathname.toLowerCase();
+    if (p.startsWith('/anggota')) return 'anggota';
+    if (p.startsWith('/kaskeluar') || p.startsWith('/beban')) return 'kaskeluar';
+    if (p.startsWith('/kasmasuk') || p.startsWith('/simpanan')) return 'kasmasuk';
+    if (p.startsWith('/pinjaman')) return 'pinjaman';
+    if (p.startsWith('/pengingat')) return 'pengingat';
+    if (p.startsWith('/warung')) return 'warung';
+    if (p.startsWith('/pembelian')) return 'pembelian';
+    if (p.startsWith('/aruskas')) return 'aruskas';
+    if (p.startsWith('/laporan')) return 'laporan';
+    if (p.startsWith('/anggaran') || p.startsWith('/rapbk')) return 'anggaran';
+    if (p.startsWith('/catatan-pengurus') || p.startsWith('/catatan_pengurus') || p.startsWith('/catatan') || p.startsWith('/spreadsheet')) return 'catatan_pengurus';
+    if (p.startsWith('/pengurus')) return 'pengurus';
+    if (p.startsWith('/pengumuman')) return 'pengumuman';
+    if (p.startsWith('/galeri')) return 'galeri';
+    if (p.startsWith('/pengaturan') || p.startsWith('/konfigurasi') || p.startsWith('/admin/profil')) return 'profil';
+    if (p.startsWith('/user-mgmt') || p.startsWith('/users')) return 'user_mgmt';
+    if (p.startsWith('/security-logs') || p.startsWith('/logs')) return 'security_logs';
+    return 'dashboard';
+  };
+
+  const activeTab = getActiveTabFromPath(location.pathname);
+
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
+  const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
 
-  // Authoritative real-time available cash balance
+  // Global search shortcut (Ctrl+K or Cmd+K)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsGlobalSearchOpen(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Kas Masuk deep link states
+  const [kasMasukInitialTab, setKasMasukInitialTab] = useState<'simpanan' | 'angsuran' | 'pembayaran_pending'>('simpanan');
+  const [kasMasukInitialSearch, setKasMasukInitialSearch] = useState<string>('');
+  const [kasMasukInitialAnggota, setKasMasukInitialAnggota] = useState<string>('');
+
+  // Pinjaman deep link states
+  const [pinjamanInitialSearch, setPinjamanInitialSearch] = useState<string>('');
+  const [pinjamanInitialAnggota, setPinjamanInitialAnggota] = useState<string>('');
+  const [pinjamanInitialId, setPinjamanInitialId] = useState<string>('');
+  const [kasKeluarInitialTab, setKasKeluarInitialTab] = useState<'beban' | 'pinjaman' | 'penarikan_simpanan' | 'pembelian' | 'rekap_bulanan'>('beban');
+
+  const handleNavigateToAngsuran = (angsuranId?: string, memberId?: string, query?: string) => {
+    setKasMasukInitialTab('angsuran');
+    if (query) {
+      setKasMasukInitialSearch(query);
+    } else if (memberId) {
+      const mem = sortedMembers.find(m => m.id === memberId);
+      if (mem) {
+        setKasMasukInitialSearch(mem.nama);
+      }
+    }
+    if (memberId) {
+      setKasMasukInitialAnggota(memberId);
+    }
+    navigate('/kasmasuk');
+  };
+
+  const handleNavigateToPinjaman = (pinjamanId?: string, memberId?: string, query?: string) => {
+    if (query) {
+      setPinjamanInitialSearch(query);
+    } else if (memberId) {
+      const mem = sortedMembers.find(m => m.id === memberId);
+      if (mem) {
+        setPinjamanInitialSearch(mem.nama);
+      }
+    } else if (pinjamanId) {
+      setPinjamanInitialSearch(pinjamanId);
+    }
+    if (memberId) {
+      setPinjamanInitialAnggota(memberId);
+    } else {
+      setPinjamanInitialAnggota('');
+    }
+    if (pinjamanId) {
+      setPinjamanInitialId(pinjamanId);
+    } else {
+      setPinjamanInitialId('');
+    }
+    setKasKeluarInitialTab('pinjaman');
+    navigate('/kaskeluar');
+  };
+
+  const handleGlobalNavigate = (tabId: string, params?: { query?: string; memberId?: string; pinjamanId?: string }) => {
+    if (tabId === 'pinjaman') {
+      handleNavigateToPinjaman(params?.pinjamanId, params?.memberId, params?.query);
+    } else if (tabId === 'kasmasuk' || tabId === 'angsuran') {
+      handleNavigateToAngsuran(undefined, params?.memberId, params?.query);
+    } else if (tabId === 'simpanan') {
+      setKasMasukInitialTab('simpanan');
+      if (params?.query) setKasMasukInitialSearch(params.query);
+      if (params?.memberId) setKasMasukInitialAnggota(params.memberId);
+      navigate('/simpanan');
+    } else {
+      handleNavigation(tabId as any);
+    }
+  };
+
+  // Security Log Handlers
+  const handleAddSecurityLog = async (logData: Omit<SecurityLog, 'id' | 'timestamp'>) => {
+    const newLog: SecurityLog = {
+      ...logData,
+      id: `sec-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: new Date().toISOString()
+    };
+    setSecurityLogs(prev => [newLog, ...prev]);
+    await saveCollectionItem<SecurityLog>('security_logs', newLog);
+  };
+
+  const handleClearSecurityLogs = async (olderThanDays?: number) => {
+    if (olderThanDays && olderThanDays > 0) {
+      const cutoffTime = Date.now() - (olderThanDays * 24 * 3600 * 1000);
+      const toKeep = securityLogs.filter(l => new Date(l.timestamp).getTime() >= cutoffTime);
+      const toDelete = securityLogs.filter(l => new Date(l.timestamp).getTime() < cutoffTime);
+      setSecurityLogs(toKeep);
+      for (const item of toDelete) {
+        await deleteCollectionItem('security_logs', item.id);
+      }
+    } else {
+      setSecurityLogs([]);
+      await clearCollection('security_logs');
+    }
+  };
+
+  // Authoritative real-time available cash balance (matching Neraca Saldo exactly)
   const availableCash = useMemo(() => {
-    const kasAwal = setup?.kasAwal ?? 0;
-    const totalSimpananAll = simpanan.reduce((a, c) => a + c.jumlah, 0);
-    const totalDisbursedAll = pinjaman.reduce((a, c) => a + c.nominalPinjaman, 0);
-    const totalAngsuranAll = angsuran.reduce((a, c) => a + c.jumlahBayar, 0);
-    const totalIncAll = income.reduce((a, c) => a + c.nominal, 0);
-    const totalExpAll = expenses.reduce((a, c) => a + c.nominal, 0);
-
-    const totalPembelianAll = pembelian.reduce((sum, p) => sum + p.totalHarga, 0);
-    const totalHutangBaruWarung = piutangWarung.filter(pw => pw.jenis === 'hutang_baru').reduce((sum, pw) => sum + pw.nominal, 0);
-    const totalPelunasanWarung = piutangWarung.filter(pw => pw.jenis === 'pelunasan').reduce((sum, pw) => sum + pw.nominal, 0);
-    const provisiRevenueAll = pinjaman.reduce((sum, p) => sum + (p.provisiDipotong || 0), 0);
-
-    return kasAwal + totalSimpananAll + totalAngsuranAll + totalIncAll + totalPelunasanWarung + provisiRevenueAll - totalDisbursedAll - totalExpAll - totalPembelianAll - totalHutangBaruWarung;
+    return calculateKasKoperasi(setup, simpanan, pinjaman, angsuran, income, expenses, pembelian, piutangWarung);
   }, [setup, simpanan, pinjaman, angsuran, income, expenses, pembelian, piutangWarung]);
 
   // Count of loans that will fall due within the next 7 days for admin badge
@@ -468,37 +854,86 @@ export default function App() {
     return count;
   }, [pinjaman, members, angsuran]);
 
+  // Count of pending payments submitted by members waiting for admin approval
+  const pendingPembayaranCount = useMemo(() => {
+    return (pembayaranPending || []).filter(p => p.status === 'Pending').length;
+  }, [pembayaranPending]);
+
+  // Count of pending loan applications waiting for admin approval
+  const pendingPengajuanCount = useMemo(() => {
+    return (pengajuanPinjaman || []).filter(p => p.status === 'Pending').length;
+  }, [pengajuanPinjaman]);
+
   // Password protection states for Profil Koperasi
   const [showPasswordModal, setShowPasswordModal] = useState<boolean>(false);
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [showModalPassword, setShowModalPassword] = useState<boolean>(false);
   const [passwordError, setPasswordError] = useState<string>('');
-  const [pendingTab, setPendingTab] = useState<'dashboard' | 'anggota' | 'kasmasuk' | 'pinjaman' | 'aruskas' | 'pembelian' | 'laporan' | 'profil' | 'pengingat' | 'pengumuman' | 'warung' | 'pengurus' | 'galeri' | null>(null);
+  const [pendingTab, setPendingTab] = useState<TabId | null>(null);
 
-  // Success Popup state for all transaction types
-  const [successPopup, setSuccessPopup] = useState<{
-    isOpen: boolean;
-    title: string;
-    subTitle?: string;
-    details?: { label: string; value: string | number; isCurrency?: boolean }[];
-  } | null>(null);
-
-  const triggerSuccessPopup = (
-    title: string,
-    subTitle?: string,
-    details?: { label: string; value: string | number; isCurrency?: boolean }[]
-  ) => {
-    setSuccessPopup({
-      isOpen: true,
-      title,
-      subTitle,
-      details
-    });
+  const handleNavigation = (tabId: TabId, subTab?: string, filterAnggota?: string) => {
+    if (userRole === 'karyawan_warung' && tabId !== 'kasmasuk' && tabId !== 'kaskeluar' && tabId !== 'warung') {
+      navigate('/warung');
+      return;
+    }
+    if (userRole === 'pengawas' && tabId !== 'dashboard' && tabId !== 'laporan') {
+      navigate('/admin');
+      return;
+    }
+    if (tabId === 'kasmasuk') {
+      if (subTab === 'pembayaran_pending' || subTab === 'angsuran' || subTab === 'simpanan' || subTab === 'pendapatan' || subTab === 'rekap_bulanan') {
+        setKasMasukInitialTab(subTab as any);
+      }
+      if (filterAnggota !== undefined) {
+        setKasMasukInitialAnggota(filterAnggota);
+      }
+      navigate('/kasmasuk');
+      return;
+    }
+    if (tabId === 'kaskeluar') {
+      if (subTab === 'pinjaman' || subTab === 'beban' || subTab === 'penarikan_simpanan' || subTab === 'pembelian' || subTab === 'rekap_bulanan') {
+        setKasKeluarInitialTab(subTab as any);
+      }
+      navigate('/kaskeluar');
+      return;
+    }
+    if (tabId === 'pinjaman') {
+      setKasKeluarInitialTab('pinjaman');
+      navigate('/kaskeluar');
+      return;
+    }
+    if (tabId === 'aruskas') {
+      navigate('/laporan');
+      return;
+    }
+    if (tabId === 'pengurus') {
+      navigate('/pengaturan');
+      return;
+    }
+    if (tabId === 'dashboard') {
+      navigate('/admin');
+    } else if (tabId === 'profil') {
+      navigate('/pengaturan');
+    } else if (tabId === 'user_mgmt') {
+      navigate('/user-mgmt');
+    } else if (tabId === 'security_logs') {
+      navigate('/security-logs');
+    } else if (tabId === 'catatan_pengurus') {
+      navigate('/catatan-pengurus');
+    } else {
+      navigate(`/${tabId}`);
+    }
   };
 
-  const handleNavigation = (tabId: 'dashboard' | 'anggota' | 'kasmasuk' | 'pinjaman' | 'aruskas' | 'pembelian' | 'laporan' | 'profil' | 'pengingat' | 'pengumuman' | 'warung' | 'pengurus' | 'galeri') => {
-    setActiveTab(tabId);
-  };
+  // Enforce role restrictions for karyawan_warung & pengawas
+  useEffect(() => {
+    if (userRole === 'karyawan_warung' && activeTab !== 'kasmasuk' && activeTab !== 'kaskeluar' && activeTab !== 'warung') {
+      navigate('/warung');
+    }
+    if (userRole === 'pengawas' && activeTab !== 'dashboard' && activeTab !== 'laporan') {
+      navigate('/admin');
+    }
+  }, [userRole, activeTab]);
 
   // Mutators for warung_barang
   const handleAddBarang = async (newB: Omit<WarungBarang, 'id'>) => {
@@ -554,13 +989,75 @@ export default function App() {
     await deleteCollectionItem('galeri_koperasi', id);
   };
 
+  // Mutators for RAPBK (Module #4)
+  const handleAddOrUpdateAnggaranItem = async (item: ItemAnggaranRAPBK) => {
+    setAnggaranRAPBK(prev => {
+      const idx = prev.findIndex(i => i.id === item.id);
+      if (idx !== -1) {
+        const next = [...prev];
+        next[idx] = item;
+        return next;
+      }
+      return [...prev, item];
+    });
+    await saveCollectionItem<ItemAnggaranRAPBK>('anggaran_rapbk', item);
+  };
+
+  const handleDeleteAnggaranItem = async (id: string) => {
+    setAnggaranRAPBK(prev => prev.filter(i => i.id !== id));
+    await deleteCollectionItem('anggaran_rapbk', id);
+  };
+
+  const handleUpdateRAPBKSetting = async (setting: RAPBKSetting) => {
+    setRAPBKSettings(prev => {
+      const idx = prev.findIndex(s => s.id === setting.id);
+      if (idx !== -1) {
+        const next = [...prev];
+        next[idx] = setting;
+        return next;
+      }
+      return [...prev, setting];
+    });
+    await saveCollectionItem<RAPBKSetting>('rapbk_settings', setting);
+  };
+
+  const handleLoadStandardRAPBKTemplate = async (year: number) => {
+    const existing = anggaranRAPBK.filter(i => i.tahunBuku === year);
+    if (existing.length > 0 && !window.confirm(`Sudah ada ${existing.length} item anggaran untuk tahun ${year}. Apakah Anda yakin ingin menimpa/memuat template standar?`)) {
+      return;
+    }
+    const templateItems = initialAnggaranRAPBK.map((item, idx) => ({
+      ...item,
+      id: `rapbk-${year}-${idx + 1}`,
+      tahunBuku: year
+    }));
+    setAnggaranRAPBK(prev => {
+      const withoutThisYear = prev.filter(i => i.tahunBuku !== year);
+      return [...withoutThisYear, ...templateItems];
+    });
+    for (const itm of templateItems) {
+      await saveCollectionItem<ItemAnggaranRAPBK>('anggaran_rapbk', itm);
+    }
+  };
+
+  // Mutators for WhatsApp Logs (Module #1)
+  const handleSaveWhatsAppLog = async (log: WhatsAppLog) => {
+    setWhatsAppLogs(prev => [log, ...prev]);
+    await saveCollectionItem<WhatsAppLog>('whatsapp_logs', log);
+  };
+
+  const handleDeleteWhatsAppLog = async (id: string) => {
+    setWhatsAppLogs(prev => prev.filter(l => l.id !== id));
+    await deleteCollectionItem('whatsapp_logs', id);
+  };
+
   const handleVerifyPassword = (e: React.FormEvent) => {
     e.preventDefault();
     if (passwordInput === 'D4nasegar') {
       sessionStorage.setItem('kop_profil_verified', 'true');
       setShowPasswordModal(false);
       if (pendingTab) {
-        setActiveTab(pendingTab);
+        handleNavigation(pendingTab);
         setPendingTab(null);
       }
     } else {
@@ -574,11 +1071,76 @@ export default function App() {
     const item: Member = { ...newM, id };
     setMembers(prev => [...prev, item]);
     await saveCollectionItem<Member>('members', item);
+
+    // Auto-create user login account if not exists
+    const uname = item.noAnggota || item.noHp || `user_${Date.now()}`;
+    const existingUserAcc = userAccounts.find(u => u.anggotaId === id || u.username.toLowerCase() === uname.toLowerCase());
+    if (!existingUserAcc) {
+      const newUserAcc: UserAccount = {
+        id: `usr-${Date.now()}`,
+        username: uname,
+        password: '123456',
+        nama: item.nama,
+        role: 'member',
+        posisiJabatan: 'Anggota Koperasi',
+        anggotaId: id,
+        isActive: true,
+        createdAt: new Date().toISOString().substring(0, 10)
+      };
+      setUserAccounts(prev => [...prev, newUserAcc]);
+      await saveCollectionItem<UserAccount>('user_accounts', newUserAcc);
+    }
+  };
+
+  const handleBatchAddMembers = async (newMembersList: Omit<Member, 'id'>[]) => {
+    const updatedMembersList = [...members];
+    const itemsToSave: Member[] = [];
+
+    for (let idx = 0; idx < newMembersList.length; idx++) {
+      const m = newMembersList[idx];
+      const trimmedNo = m.noAnggota ? m.noAnggota.trim().toLowerCase() : '';
+      const existingIndex = trimmedNo 
+        ? updatedMembersList.findIndex(ex => ex.noAnggota && ex.noAnggota.trim().toLowerCase() === trimmedNo)
+        : -1;
+
+      if (existingIndex !== -1) {
+        const existing = updatedMembersList[existingIndex];
+        const replacedMember: Member = {
+          ...existing,
+          ...m,
+          id: existing.id,
+          fotoUrl: m.fotoUrl || existing.fotoUrl || '',
+          isVerified: existing.isVerified !== undefined ? existing.isVerified : true,
+        };
+        updatedMembersList[existingIndex] = replacedMember;
+        itemsToSave.push(replacedMember);
+      } else {
+        const freshMember: Member = {
+          ...m,
+          id: `m-${Date.now()}-${idx}`
+        };
+        updatedMembersList.push(freshMember);
+        itemsToSave.push(freshMember);
+      }
+    }
+
+    setMembers(updatedMembersList);
+    for (const item of itemsToSave) {
+      await saveCollectionItem<Member>('members', item);
+    }
   };
 
   const handleEditMember = async (updatedM: Member) => {
     setMembers(prev => prev.map(m => m.id === updatedM.id ? updatedM : m));
     await saveCollectionItem<Member>('members', updatedM);
+
+    // Sync related user account if name changed
+    const relatedUserAcc = userAccounts.find(u => u.anggotaId === updatedM.id || u.username === updatedM.noAnggota);
+    if (relatedUserAcc && relatedUserAcc.nama !== updatedM.nama) {
+      const updatedAcc = { ...relatedUserAcc, nama: updatedM.nama };
+      setUserAccounts(prev => prev.map(u => u.id === updatedAcc.id ? updatedAcc : u));
+      await saveCollectionItem<UserAccount>('user_accounts', updatedAcc);
+    }
   };
 
   const handleDeleteMember = async (id: string) => {
@@ -586,6 +1148,7 @@ export default function App() {
     setSimpanan(prev => prev.filter(s => s.anggotaId !== id));
     setPinjaman(prev => prev.filter(p => p.anggotaId !== id));
     setAngsuran(prev => prev.filter(a => a.anggotaId !== id));
+    setUserAccounts(prev => prev.filter(u => u.anggotaId !== id));
 
     await deleteCollectionItem('members', id);
   };
@@ -597,33 +1160,10 @@ export default function App() {
       for (const item of freshSavings) {
         await saveCollectionItem<Simpanan>('simpanan', item);
       }
-      const totalAmount = freshSavings.reduce((acc, s) => acc + s.jumlah, 0);
-      const firstS = freshSavings[0];
-      const m = members.find(m => m.id === firstS.anggotaId);
-      triggerSuccessPopup(
-        totalAmount >= 0 ? "Setor Simpanan Berhasil" : "Penarikan Simpanan Berhasil",
-        totalAmount >= 0 ? "Simpanan koperasi berhasil disetor dan dibukukan" : "Penarikan simpanan berhasil dibukukan",
-        [
-          { label: "Nama Anggota", value: m?.nama || "Umum" },
-          { label: "Total Transaksi", value: Math.abs(totalAmount), isCurrency: true },
-          { label: "Tanggal", value: firstS.tanggal }
-        ]
-      );
     } else {
       const item: Simpanan = { ...newS, id: `s-${Date.now()}` };
       setSimpanan(prev => [...prev, item]);
       await saveCollectionItem<Simpanan>('simpanan', item);
-      const m = members.find(m => m.id === newS.anggotaId);
-      triggerSuccessPopup(
-        item.jumlah >= 0 ? "Setor Simpanan Berhasil" : "Penarikan Simpanan Berhasil",
-        item.jumlah >= 0 ? `Setoran Simpanan ${newS.jenis} berhasil dibukukan` : `Penarikan Simpanan ${newS.jenis} berhasil dibukukan`,
-        [
-          { label: "Nama Anggota", value: m?.nama || "Umum" },
-          { label: "Jenis Simpanan", value: newS.jenis },
-          { label: "Nominal", value: Math.abs(item.jumlah), isCurrency: true },
-          { label: "Tanggal", value: item.tanggal }
-        ]
-      );
     }
   };
 
@@ -632,17 +1172,6 @@ export default function App() {
     const item: Pinjaman = { ...newP, id };
     setPinjaman(prev => [...prev, item]);
     await saveCollectionItem<Pinjaman>('pinjaman', item);
-    const m = members.find(m => m.id === newP.anggotaId);
-    triggerSuccessPopup(
-      "Pencairan Pinjaman Berhasil",
-      "Pemberian pinjaman koperasi telah disetujui dan dicairkan",
-      [
-        { label: "Nama Anggota", value: m?.nama || "Umum" },
-        { label: "Nominal Pinjaman", value: newP.nominalPinjaman, isCurrency: true },
-        { label: "Tenor", value: `${newP.tenor} Bulan` },
-        { label: "Angsuran Bulanan", value: newP.totalAngsuranPerBulan, isCurrency: true }
-      ]
-    );
   };
 
   const handleEditPinjaman = async (updatedP: Pinjaman) => {
@@ -656,6 +1185,12 @@ export default function App() {
   };
 
   const handleAddPengajuanPinjaman = async (newPengajuan: Omit<PengajuanPinjaman, 'id' | 'status' | 'tanggalPengajuan' | 'catatanPengurus'>) => {
+    // Check if member already has a pending loan proposal (status === 'Pending') to prevent double entry
+    const existingPending = pengajuanPinjaman.find(p => p.anggotaId === newPengajuan.anggotaId && p.status === 'Pending');
+    if (existingPending) {
+      throw new Error(`Anda sudah memiliki usulan pinjaman aktif yang sedang ditinjau pengurus (ID: ${existingPending.id}, Diajukan: ${existingPending.tanggalPengajuan}). Pengajuan ganda dicegah agar tidak terjadi data double.`);
+    }
+
     const id = `req-${Date.now()}`;
     const todayStr = new Date().toISOString().split('T')[0];
     
@@ -671,22 +1206,55 @@ export default function App() {
     };
     setPengajuanPinjaman(prev => [...prev, item]);
     await saveCollectionItem<PengajuanPinjaman>('pengajuan_pinjaman', item);
+
+    // Record member activity log
+    const memberObj = members.find(m => m.id === newPengajuan.anggotaId);
+    await handleAddSecurityLog({
+      userId: newPengajuan.anggotaId,
+      userNama: memberObj?.nama || 'Anggota Koperasi',
+      role: 'member',
+      action: 'PENGAJUAN_PINJAMAN_ONLINE',
+      category: 'Data Finansial',
+      severity: 'info',
+      status: 'SUCCESS',
+      description: `Anggota ${memberObj?.nama || ''} (No. ${memberObj?.noAnggota || '-'}) mengajukan pinjaman baru sebesar Rp ${newPengajuan.nominalPinjaman.toLocaleString('id-ID')} dengan tenor ${newPengajuan.tenor} bulan. Alasan: ${newPengajuan.alasanPengajuan || 'Kebutuhan Anggota'}.`,
+      ipAddress: '182.253.' + Math.floor(Math.random() * 200 + 10) + '.' + Math.floor(Math.random() * 200 + 10),
+      userAgent: navigator.userAgent || 'Mozilla/5.0 (Mobile/Web Browser)',
+      metadata: {
+        noAnggota: memberObj?.noAnggota,
+        pengajuanId: id,
+        nominal: newPengajuan.nominalPinjaman,
+        tenorBulan: newPengajuan.tenor,
+        alasan: newPengajuan.alasanPengajuan
+      }
+    });
+
+    return item;
   };
 
-  const handleApprovePengajuanPinjaman = async (id: string, catatan: string, customNominal?: number) => {
+  const handleApprovePengajuanPinjaman = async (
+    id: string, 
+    catatan: string, 
+    customNominal?: number, 
+    isPartial?: boolean
+  ) => {
     const updatedList = pengajuanPinjaman.map(p => {
       if (p.id === id) {
         const approvedNominal = customNominal !== undefined && customNominal > 0 ? customNominal : p.nominalPinjaman;
         const provisi = (approvedNominal * p.biayaProvisiPersen) / 100;
         const diterima = approvedNominal - provisi;
+        const isPartiallyApproved = isPartial || (customNominal !== undefined && customNominal > 0 && customNominal < p.nominalPinjaman);
 
-        const updated = { 
+        const updated: PengajuanPinjaman = { 
           ...p, 
-          status: 'Disetujui' as const, 
+          status: isPartiallyApproved ? 'Disetujui Sebagian' : 'Disetujui', 
           catatanPengurus: catatan,
+          nominalPengajuanAwal: p.nominalPengajuanAwal || p.nominalPinjaman,
+          nominalDisetujui: approvedNominal,
           nominalPinjaman: approvedNominal,
           provisiDipotong: provisi,
-          jumlahDiterima: diterima
+          jumlahDiterima: diterima,
+          tanggalDiproses: new Date().toISOString().split('T')[0]
         };
         saveCollectionItem<PengajuanPinjaman>('pengajuan_pinjaman', updated);
         
@@ -709,14 +1277,40 @@ export default function App() {
           biayaProvisiPersen: p.biayaProvisiPersen,
           provisiDipotong: provisi,
           jumlahDiterima: diterima,
-          status: 'Belum Lunas' as const,
+          status: 'Belum Lunas',
           angsuranPokokPerBulan,
           jasaPerBulan,
           totalAngsuranPerBulan,
-          totalWajibBayar
+          totalWajibBayar,
+          keterangan: isPartiallyApproved 
+            ? `Disetujui sebagian (Rp ${approvedNominal.toLocaleString('id-ID')} dari pengajuan Rp ${(p.nominalPengajuanAwal || p.nominalPinjaman).toLocaleString('id-ID')})` 
+            : undefined
         };
         setPinjaman(prev => [...prev, newPinjaman]);
         saveCollectionItem<Pinjaman>('pinjaman', newPinjaman);
+
+        const memberObj = members.find(m => m.id === p.anggotaId);
+        handleAddSecurityLog({
+          userId: currentUserAccount?.id || 'admin-system',
+          userNama: currentUserAccount?.nama || 'Administrator',
+          role: 'admin',
+          action: isPartiallyApproved ? 'PENGAJUAN_PINJAMAN_DISETUJUI_SEBAGIAN' : 'PENGAJUAN_PINJAMAN_DISETUJUI',
+          category: 'Data Finansial',
+          severity: 'info',
+          status: 'SUCCESS',
+          description: isPartiallyApproved 
+            ? `Pengajuan pinjaman anggota ${memberObj?.nama || ''} (${memberObj?.noAnggota || '-'}) disetujui sebagian sebesar Rp ${approvedNominal.toLocaleString('id-ID')} (pengajuan awal Rp ${(p.nominalPengajuanAwal || p.nominalPinjaman).toLocaleString('id-ID')}). Catatan: ${catatan || '-'}`
+            : `Pengajuan pinjaman anggota ${memberObj?.nama || ''} (${memberObj?.noAnggota || '-'}) disetujui penuh sebesar Rp ${approvedNominal.toLocaleString('id-ID')}. Catatan: ${catatan || '-'}`,
+          ipAddress: '127.0.0.1',
+          userAgent: navigator.userAgent || 'Web Browser',
+          metadata: {
+            pengajuanId: id,
+            nominalAwal: p.nominalPengajuanAwal || p.nominalPinjaman,
+            nominalDisetujui: approvedNominal,
+            status: isPartiallyApproved ? 'Disetujui Sebagian' : 'Disetujui',
+            catatan
+          }
+        });
 
         return updated;
       }
@@ -726,10 +1320,37 @@ export default function App() {
   };
 
   const handleRejectPengajuanPinjaman = async (id: string, catatan: string) => {
+    const todayStr = new Date().toISOString().split('T')[0];
     setPengajuanPinjaman(prev => prev.map(p => {
       if (p.id === id) {
-        const updated = { ...p, status: 'Ditolak' as const, catatanPengurus: catatan };
+        const updated: PengajuanPinjaman = { 
+          ...p, 
+          status: 'Ditolak', 
+          catatanPengurus: catatan,
+          tanggalDiproses: todayStr 
+        };
         saveCollectionItem<PengajuanPinjaman>('pengajuan_pinjaman', updated);
+
+        const memberObj = members.find(m => m.id === p.anggotaId);
+        handleAddSecurityLog({
+          userId: currentUserAccount?.id || 'admin-system',
+          userNama: currentUserAccount?.nama || 'Administrator',
+          role: 'admin',
+          action: 'PENGAJUAN_PINJAMAN_DITOLAK',
+          category: 'Data Finansial',
+          severity: 'warning',
+          status: 'SUCCESS',
+          description: `Pengajuan pinjaman anggota ${memberObj?.nama || ''} (${memberObj?.noAnggota || '-'}) sebesar Rp ${p.nominalPinjaman.toLocaleString('id-ID')} ditolak. Alasan: ${catatan || '-'}`,
+          ipAddress: '127.0.0.1',
+          userAgent: navigator.userAgent || 'Web Browser',
+          metadata: {
+            pengajuanId: id,
+            nominal: p.nominalPinjaman,
+            status: 'Ditolak',
+            catatan
+          }
+        });
+
         return updated;
       }
       return p;
@@ -737,164 +1358,341 @@ export default function App() {
   };
 
   const handleAddPembayaranPending = async (newPayment: Omit<PembayaranPending, 'id' | 'status'>) => {
+    // Check if an identical pending payment already exists to prevent duplicate entries
+    const isDuplicate = pembayaranPending.some(p => 
+      p.status === 'Pending' &&
+      p.anggotaId === newPayment.anggotaId &&
+      p.jenis === newPayment.jenis &&
+      p.jumlah === newPayment.jumlah &&
+      p.tanggal === newPayment.tanggal &&
+      (p.pinjamanId === newPayment.pinjamanId || !p.pinjamanId)
+    );
+    if (isDuplicate) {
+      throw new Error(`Konfirmasi pembayaran serupa (${newPayment.jenis} sebesar Rp ${newPayment.jumlah.toLocaleString('id-ID')}) sudah pernah dikirimkan pada tanggal ${newPayment.tanggal} dan saat ini berstatus PENDING. Mohon tunggu verifikasi pengurus.`);
+    }
+
     const id = `pay-${Date.now()}`;
     const item: PembayaranPending = {
       ...newPayment,
       id,
       status: 'Pending'
     };
-    setPembayaranPending(prev => [...prev, item]);
-    await saveCollectionItem<PembayaranPending>('pembayaran_pending', item);
+
+    // Update state immediately for instant feedback
+    setPembayaranPending(prev => {
+      const updated = [...prev, item];
+      try {
+        localStorage.setItem('kop_pembayaran_pending', JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
+
+    // Save to Firestore cloud database
+    try {
+      await saveCollectionItem<PembayaranPending>('pembayaran_pending', item);
+    } catch (saveErr) {
+      console.warn("Gagal menyimpan pembayaran pending ke cloud, disimpan di lokal:", saveErr);
+    }
+
+    // Record member activity log
+    const memberObj = members.find(m => m.id === newPayment.anggotaId);
+    await handleAddSecurityLog({
+      userId: newPayment.anggotaId,
+      userNama: memberObj?.nama || 'Anggota Koperasi',
+      role: 'member',
+      action: 'KONFIRMASI_PEMBAYARAN_MANDIRI',
+      category: 'Data Finansial',
+      severity: 'info',
+      status: 'SUCCESS',
+      description: `Anggota ${memberObj?.nama || ''} (No. ${memberObj?.noAnggota || '-'}) mengonfirmasi pembayaran ${newPayment.jenis} sebesar Rp ${newPayment.jumlah.toLocaleString('id-ID')}${newPayment.keterangan ? ` (${newPayment.keterangan})` : ''}.`,
+      ipAddress: '182.253.' + Math.floor(Math.random() * 200 + 10) + '.' + Math.floor(Math.random() * 200 + 10),
+      userAgent: navigator.userAgent || 'Mozilla/5.0 (Mobile/Web Browser)',
+      metadata: {
+        noAnggota: memberObj?.noAnggota,
+        pembayaranId: id,
+        jenisPembayaran: newPayment.jenis,
+        nominal: newPayment.jumlah,
+        keterangan: newPayment.keterangan
+      }
+    });
+
+    return item;
   };
 
   const handleApprovePembayaranPending = async (id: string, catatan?: string) => {
-    setPembayaranPending(prev => prev.map(p => {
-      if (p.id === id) {
-        const updated: PembayaranPending = {
-          ...p,
-          status: 'Disetujui' as const,
-          catatanPengurus: catatan || 'Disetujui oleh pengurus.'
-        };
-        saveCollectionItem<PembayaranPending>('pembayaran_pending', updated);
+    const p = pembayaranPending.find(item => item.id === id);
+    if (!p) return;
 
-        // Process actual ledger entry based on payment type
-        if (p.jenis === 'Simpanan Pokok') {
-          handleAddSimpanan({
-            anggotaId: p.anggotaId,
-            tanggal: p.tanggal,
-            jenis: 'Pokok',
-            jumlah: p.jumlah,
-            keterangan: p.keterangan || 'Setoran Simpanan Pokok mandiri divalidasi'
-          });
-        } else if (p.jenis === 'Simpanan Wajib') {
-          handleAddSimpanan({
-            anggotaId: p.anggotaId,
-            tanggal: p.tanggal,
-            jenis: 'Wajib',
-            jumlah: p.jumlah,
-            keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri divalidasi'
-          });
-        } else if (p.jenis === 'Simpanan Manasuka') {
-          handleAddSimpanan({
-            anggotaId: p.anggotaId,
-            tanggal: p.tanggal,
-            jenis: 'Sukarela',
-            jumlah: p.jumlah,
-            keterangan: p.keterangan || 'Setoran Simpanan Manasuka mandiri divalidasi'
-          });
-        } else if (p.jenis === 'Angsuran') {
-          // Check if loan is lunas
-          const pinj = pinjaman.find(loan => loan.id === p.pinjamanId);
-          const related = angsuran.filter(a => a.pinjamanId === p.pinjamanId);
-          const paidMonthsCount = related.length + 1;
-          const markAsLunas = pinj ? paidMonthsCount >= pinj.tenor : false;
+    const updated: PembayaranPending = {
+      ...p,
+      status: 'Disetujui' as const,
+      catatanPengurus: catatan || 'Disetujui oleh pengurus.'
+    };
 
-          handleAddAngsuran({
+    setPembayaranPending(prev => {
+      const next = prev.map(item => item.id === id ? updated : item);
+      try {
+        localStorage.setItem('kop_pembayaran_pending', JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+
+    try {
+      await saveCollectionItem<PembayaranPending>('pembayaran_pending', updated);
+    } catch (err) {
+      console.warn("Failed to update status in cloud:", err);
+    }
+
+    // Process actual ledger entry based on payment type outside the state setter
+    const txId = `TX-${p.id}`;
+    if (p.jenis === 'Simpanan Wajib') {
+      await handleAddSimpanan({
+        anggotaId: p.anggotaId,
+        tanggal: p.tanggal,
+        jenis: 'Wajib',
+        jumlah: p.jumlah,
+        keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri divalidasi',
+        transaksiId: txId
+      });
+    } else if (p.jenis === 'Angsuran') {
+      const pinj = pinjaman.find(loan => loan.id === p.pinjamanId);
+      let markAsLunas = false;
+
+      if (pinj) {
+        const related = angsuran.filter(a => a.pinjamanId === p.pinjamanId);
+        const sisaPokok = calculateLoanOutstanding(pinj, related);
+        const regPokok = pinj.angsuranPokokPerBulan || Math.round(pinj.nominalPinjaman / (pinj.tenor || 1));
+        const monthlyInterest = pinj.jasaPerBulan > 0 
+          ? pinj.jasaPerBulan 
+          : Math.round(pinj.nominalPinjaman * (pinj.bungaFlatPersen ? pinj.bungaFlatPersen / 100 : 0.015));
+        const totalMonthly = regPokok + monthlyInterest;
+
+        // Deteksi jika pembayaran mencakup 2 bulan sekaligus (tunggakan + berjalan)
+        const isTwoMonths = (
+          (totalMonthly > 0 && p.jumlah >= totalMonthly * 1.75 && p.jumlah <= totalMonthly * 2.25) ||
+          Boolean(p.keterangan?.toLowerCase().includes('2 bulan') || p.keterangan?.toLowerCase().includes('2 kali') || p.keterangan?.toLowerCase().includes('dua bulan'))
+        );
+
+        if (isTwoMonths) {
+          const bKe = p.bulanKe || 1;
+          const items: Omit<Angsuran, 'id'>[] = [
+            {
+              pinjamanId: p.pinjamanId!,
+              anggotaId: p.anggotaId,
+              tanggal: p.tanggal,
+              pokokBayar: regPokok,
+              jasaBayar: monthlyInterest,
+              jumlahBayar: regPokok + monthlyInterest,
+              bulanKe: bKe,
+              keterangan: p.keterangan 
+                ? `${p.keterangan} (Angsuran Ke-${bKe} - Tunggakan Bulan Kemarin)` 
+                : `Angsuran ke-${bKe} (Pelunasan Tunggakan Bulan Kemarin) divalidasi`
+            },
+            {
+              pinjamanId: p.pinjamanId!,
+              anggotaId: p.anggotaId,
+              tanggal: p.tanggal,
+              pokokBayar: regPokok,
+              jasaBayar: monthlyInterest,
+              jumlahBayar: regPokok + monthlyInterest,
+              bulanKe: bKe + 1,
+              keterangan: p.keterangan 
+                ? `${p.keterangan} (Angsuran Ke-${bKe + 1} - Bulan Berjalan)` 
+                : `Angsuran ke-${bKe + 1} (Bulan Berjalan) divalidasi`
+            }
+          ];
+          markAsLunas = (regPokok * 2 >= sisaPokok) || Boolean(p.keterangan?.toLowerCase().includes('lunas'));
+          await handleAddAngsuran(items, markAsLunas);
+        } else {
+          const jasaBayar = Math.min(p.jumlah, monthlyInterest);
+          const pokokBayar = Math.max(0, p.jumlah - jasaBayar);
+          markAsLunas = (pokokBayar >= sisaPokok) || Boolean(p.keterangan?.toLowerCase().includes('lunas'));
+
+          await handleAddAngsuran({
             pinjamanId: p.pinjamanId!,
             anggotaId: p.anggotaId,
             tanggal: p.tanggal,
+            pokokBayar,
+            jasaBayar,
             jumlahBayar: p.jumlah,
             bulanKe: p.bulanKe || 1,
             keterangan: p.keterangan || `Angsuran ke-${p.bulanKe} mandiri divalidasi`
           }, markAsLunas);
-        } else if (p.jenis === 'Simpanan Wajib & Angsuran' || p.jenis === 'Gabungan') {
-          // Process Simpanan Pokok part
-          if (p.jumlahSimpananPokok && p.jumlahSimpananPokok > 0) {
-            handleAddSimpanan({
-              anggotaId: p.anggotaId,
-              tanggal: p.tanggal,
-              jenis: 'Pokok',
-              jumlah: p.jumlahSimpananPokok,
-              keterangan: p.keterangan || 'Setoran Simpanan Pokok mandiri (gabungan) divalidasi'
-            });
-          }
-          // Process Simpanan Wajib part
-          if (p.jumlahSimpananWajib && p.jumlahSimpananWajib > 0) {
-            handleAddSimpanan({
-              anggotaId: p.anggotaId,
-              tanggal: p.tanggal,
-              jenis: 'Wajib',
-              jumlah: p.jumlahSimpananWajib,
-              keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri (gabungan) divalidasi'
-            });
-          }
-          // Process Simpanan Manasuka part
-          if (p.jumlahSimpananManasuka && p.jumlahSimpananManasuka > 0) {
-            handleAddSimpanan({
-              anggotaId: p.anggotaId,
-              tanggal: p.tanggal,
-              jenis: 'Sukarela',
-              jumlah: p.jumlahSimpananManasuka,
-              keterangan: p.keterangan || 'Setoran Simpanan Manasuka mandiri (gabungan) divalidasi'
-            });
-          }
-          // Process Angsuran part
-          if (p.jumlahAngsuran && p.jumlahAngsuran > 0 && p.pinjamanId) {
-            const pinj = pinjaman.find(loan => loan.id === p.pinjamanId);
-            const related = angsuran.filter(a => a.pinjamanId === p.pinjamanId);
-            const paidMonthsCount = related.length + 1;
-            const markAsLunas = pinj ? paidMonthsCount >= pinj.tenor : false;
+        }
+      }
+    } else if (p.jenis === 'Simpanan Wajib & Angsuran') {
+      if (p.jumlahSimpananWajib && p.jumlahSimpananWajib > 0) {
+        await handleAddSimpanan({
+          anggotaId: p.anggotaId,
+          tanggal: p.tanggal,
+          jenis: 'Wajib',
+          jumlah: p.jumlahSimpananWajib,
+          keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri (gabungan) divalidasi',
+          transaksiId: txId
+        });
+      }
+      if (p.jumlahAngsuran && p.jumlahAngsuran > 0 && p.pinjamanId) {
+        const pinj = pinjaman.find(loan => loan.id === p.pinjamanId);
+        let markAsLunas = false;
 
-            handleAddAngsuran({
+        if (pinj) {
+          const related = angsuran.filter(a => a.pinjamanId === p.pinjamanId);
+          const sisaPokok = calculateLoanOutstanding(pinj, related);
+          const regPokok = pinj.angsuranPokokPerBulan || Math.round(pinj.nominalPinjaman / (pinj.tenor || 1));
+          const monthlyInterest = pinj.jasaPerBulan > 0 
+            ? pinj.jasaPerBulan 
+            : Math.round(pinj.nominalPinjaman * (pinj.bungaFlatPersen ? pinj.bungaFlatPersen / 100 : 0.015));
+          const totalMonthly = regPokok + monthlyInterest;
+
+          const isTwoMonths = (
+            (totalMonthly > 0 && p.jumlahAngsuran >= totalMonthly * 1.75 && p.jumlahAngsuran <= totalMonthly * 2.25) ||
+            Boolean(p.keterangan?.toLowerCase().includes('2 bulan') || p.keterangan?.toLowerCase().includes('2 kali') || p.keterangan?.toLowerCase().includes('dua bulan'))
+          );
+
+          if (isTwoMonths) {
+            const bKe = p.bulanKe || 1;
+            const items: Omit<Angsuran, 'id'>[] = [
+              {
+                pinjamanId: p.pinjamanId,
+                anggotaId: p.anggotaId,
+                tanggal: p.tanggal,
+                pokokBayar: regPokok,
+                jasaBayar: monthlyInterest,
+                jumlahBayar: regPokok + monthlyInterest,
+                bulanKe: bKe,
+                keterangan: p.keterangan 
+                  ? `${p.keterangan} (Angsuran Ke-${bKe} - Tunggakan Bulan Kemarin)` 
+                  : `Angsuran ke-${bKe} (Tunggakan Bulan Kemarin) mandiri (gabungan) divalidasi`
+              },
+              {
+                pinjamanId: p.pinjamanId,
+                anggotaId: p.anggotaId,
+                tanggal: p.tanggal,
+                pokokBayar: regPokok,
+                jasaBayar: monthlyInterest,
+                jumlahBayar: regPokok + monthlyInterest,
+                bulanKe: bKe + 1,
+                keterangan: p.keterangan 
+                  ? `${p.keterangan} (Angsuran Ke-${bKe + 1} - Bulan Berjalan)` 
+                  : `Angsuran ke-${bKe + 1} (Bulan Berjalan) mandiri (gabungan) divalidasi`
+              }
+            ];
+            markAsLunas = (regPokok * 2 >= sisaPokok) || Boolean(p.keterangan?.toLowerCase().includes('lunas'));
+            await handleAddAngsuran(items, markAsLunas);
+          } else {
+            const jasaBayar = Math.min(p.jumlahAngsuran, monthlyInterest);
+            const pokokBayar = Math.max(0, p.jumlahAngsuran - jasaBayar);
+            markAsLunas = (pokokBayar >= sisaPokok) || Boolean(p.keterangan?.toLowerCase().includes('lunas'));
+
+            await handleAddAngsuran({
               pinjamanId: p.pinjamanId,
               anggotaId: p.anggotaId,
               tanggal: p.tanggal,
+              pokokBayar,
+              jasaBayar,
               jumlahBayar: p.jumlahAngsuran,
               bulanKe: p.bulanKe || 1,
               keterangan: p.keterangan || `Angsuran ke-${p.bulanKe} mandiri (gabungan) divalidasi`
             }, markAsLunas);
           }
         }
-
-        return updated;
       }
-      return p;
-    }));
+    } else if (p.jenis === 'Simpanan Pokok & Wajib') {
+      const spNominal = (p.jumlahSimpananPokok && p.jumlahSimpananPokok > 0) 
+        ? p.jumlahSimpananPokok 
+        : Math.max(0, p.jumlah - (p.jumlahSimpananWajib || 0));
+      if (spNominal > 0) {
+        await handleAddSimpanan({
+          anggotaId: p.anggotaId,
+          tanggal: p.tanggal,
+          jenis: 'Pokok',
+          jumlah: spNominal,
+          keterangan: p.keterangan || 'Setoran Simpanan Pokok mandiri divalidasi',
+          transaksiId: txId
+        });
+      }
+      if (p.jumlahSimpananWajib && p.jumlahSimpananWajib > 0) {
+        await handleAddSimpanan({
+          anggotaId: p.anggotaId,
+          tanggal: p.tanggal,
+          jenis: 'Wajib',
+          jumlah: p.jumlahSimpananWajib,
+          keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri (gabungan Pokok+Wajib) divalidasi',
+          transaksiId: txId
+        });
+      }
+    } else if (p.jenis === 'Simpanan Pokok') {
+      await handleAddSimpanan({
+        anggotaId: p.anggotaId,
+        tanggal: p.tanggal,
+        jenis: 'Pokok',
+        jumlah: p.jumlah,
+        keterangan: p.keterangan || 'Setoran Simpanan Pokok mandiri divalidasi',
+        transaksiId: txId
+      });
+    } else if (p.jenis === 'Pelunasan Hutang Warung') {
+      await handleAddPiutang({
+        anggotaId: p.anggotaId,
+        tanggal: p.tanggal,
+        jenis: 'pelunasan',
+        nominal: p.jumlah,
+        keterangan: p.keterangan || 'Pelunasan hutang toko/warung mandiri anggota divalidasi'
+      });
+    }
   };
 
   const handleRejectPembayaranPending = async (id: string, catatan?: string) => {
-    setPembayaranPending(prev => prev.map(p => {
-      if (p.id === id) {
-        const updated: PembayaranPending = {
-          ...p,
-          status: 'Ditolak' as const,
-          catatanPengurus: catatan || 'Ditolak oleh pengurus.'
-        };
-        saveCollectionItem<PembayaranPending>('pembayaran_pending', updated);
-        return updated;
-      }
-      return p;
-    }));
-  };
-
-  const handleAddAngsuran = async (newA: Omit<Angsuran, 'id'>, markAsLunas: boolean) => {
-    const id = `a-${Date.now()}`;
-    const item: Angsuran = { ...newA, id };
-    setAngsuran(prev => [...prev, item]);
-    await saveCollectionItem<Angsuran>('angsuran', item);
-
-    if (markAsLunas) {
-      setPinjaman(prev => prev.map(p => {
-        if (p.id === newA.pinjamanId) {
-          const updated = { ...p, status: 'Lunas' as const };
-          saveCollectionItem<Pinjaman>('pinjaman', updated);
+    setPembayaranPending(prev => {
+      const next = prev.map(p => {
+        if (p.id === id) {
+          const updated: PembayaranPending = {
+            ...p,
+            status: 'Ditolak' as const,
+            catatanPengurus: catatan || 'Ditolak oleh pengurus.'
+          };
+          saveCollectionItem<PembayaranPending>('pembayaran_pending', updated).catch(e => console.warn(e));
           return updated;
         }
         return p;
-      }));
+      });
+      try {
+        localStorage.setItem('kop_pembayaran_pending', JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+  };
+
+  const handleAddAngsuran = async (newA: Omit<Angsuran, 'id'> | Omit<Angsuran, 'id'>[], markAsLunas: boolean) => {
+    const itemsToAdd: Omit<Angsuran, 'id'>[] = Array.isArray(newA) ? newA : [newA];
+    if (itemsToAdd.length === 0) return;
+
+    const baseTime = Date.now();
+    const createdItems: Angsuran[] = itemsToAdd.map((item, idx) => ({
+      ...item,
+      id: `a-${baseTime}-${idx}-${Math.random().toString(36).substring(2, 7)}`
+    }));
+
+    const updatedAngsuranList = [...angsuran, ...createdItems];
+    setAngsuran(updatedAngsuranList);
+    for (const item of createdItems) {
+      await saveCollectionItem<Angsuran>('angsuran', item);
     }
 
-    const m = members.find(m => m.id === newA.anggotaId);
-    triggerSuccessPopup(
-      "Pembayaran Angsuran Berhasil",
-      `Pencatatan angsuran bulan ke-${newA.bulanKe} telah berhasil disimpan`,
-      [
-        { label: "Nama Anggota", value: m?.nama || "Umum" },
-        { label: "Angsuran Bulan Ke", value: newA.bulanKe },
-        { label: "Jumlah Bayar", value: newA.jumlahBayar, isCurrency: true },
-        { label: "Status Pinjaman", value: markAsLunas ? "LUNAS" : "Belum Lunas" }
-      ]
-    );
+    // Re-evaluate Pinjaman status: jika sisa pinjaman 0 maka status jadi Lunas
+    const targetLoanId = itemsToAdd[0]?.pinjamanId;
+    const targetLoan = pinjaman.find(p => p.id === targetLoanId);
+    if (targetLoan) {
+      const allRepaysForLoan = updatedAngsuranList.filter(a => a.pinjamanId === targetLoan.id);
+      const remainingPrincipal = calculateLoanOutstanding(targetLoan, allRepaysForLoan);
+      const shouldBeLunas = markAsLunas || remainingPrincipal <= 0;
+      const newStatus = shouldBeLunas ? 'Lunas' : 'Belum Lunas';
+
+      if (targetLoan.status !== newStatus) {
+        const updated = { ...targetLoan, status: newStatus as 'Lunas' | 'Belum Lunas' };
+        setPinjaman(prev => prev.map(p => p.id === targetLoanId ? updated : p));
+        await saveCollectionItem<Pinjaman>('pinjaman', updated);
+      }
+    }
   };
 
   const handleDeleteAngsuran = async (id: string) => {
@@ -907,25 +1705,27 @@ export default function App() {
     }
 
     try {
-      // Optmistically update local state
-      setAngsuran(prev => prev.filter(a => a.id !== id));
+      // Optimistically update local state
+      const remainingAngsuran = angsuran.filter(a => a.id !== id);
+      setAngsuran(remainingAngsuran);
       
       // Perform database deletion
       await deleteCollectionItem('angsuran', id);
       console.log("handleDeleteAngsuran: Database deletion successful for ID:", id);
 
-      // Revert Pinjaman status to 'Belum Lunas' if it was set to 'Lunas'
+      // Re-evaluate Pinjaman status based on remaining loan balance
       const relatedPinjaman = pinjaman.find(p => p.id === target.pinjamanId);
-      if (relatedPinjaman && relatedPinjaman.status === 'Lunas') {
-        setPinjaman(prev => prev.map(p => {
-          if (p.id === target.pinjamanId) {
-            const updated = { ...p, status: 'Belum Lunas' as const };
-            saveCollectionItem<Pinjaman>('pinjaman', updated);
-            return updated;
-          }
-          return p;
-        }));
-        console.log("handleDeleteAngsuran: Related loan status reverted to Belum Lunas.");
+      if (relatedPinjaman) {
+        const remainingRepaysForP = remainingAngsuran.filter(a => a.pinjamanId === relatedPinjaman.id);
+        const remainingPrincipal = calculateLoanOutstanding(relatedPinjaman, remainingRepaysForP);
+        const newStatus = remainingPrincipal <= 0 ? 'Lunas' : 'Belum Lunas';
+
+        if (relatedPinjaman.status !== newStatus) {
+          const updated = { ...relatedPinjaman, status: newStatus as 'Lunas' | 'Belum Lunas' };
+          setPinjaman(prev => prev.map(p => p.id === target.pinjamanId ? updated : p));
+          await saveCollectionItem<Pinjaman>('pinjaman', updated);
+          console.log("handleDeleteAngsuran: Related loan status updated to:", newStatus);
+        }
       }
       
       alert("Catatan angsuran berhasil dihapus.");
@@ -995,20 +1795,51 @@ export default function App() {
     }
   };
 
+  const handleEditAngsuran = async (updated: Angsuran) => {
+    console.log("handleEditAngsuran triggered for:", updated);
+    const original = angsuran.find(a => a.id === updated.id);
+    if (!original) {
+      console.warn("handleEditAngsuran: Original installment not found for ID:", updated.id);
+      alert("Catatan angsuran tidak ditemukan.");
+      return;
+    }
+
+    try {
+      // Optimistically update local state
+      const updatedList = angsuran.map(a => a.id === updated.id ? updated : a);
+      setAngsuran(updatedList);
+      
+      // Save to DB
+      await saveCollectionItem<Angsuran>('angsuran', updated);
+      console.log("handleEditAngsuran: Database update successful for ID:", updated.id);
+
+      // Re-evaluate Pinjaman status (Lunas / Belum Lunas) based on remaining principal: jika sisa pinjaman 0 maka status jadi Lunas
+      const relatedPinjaman = pinjaman.find(p => p.id === updated.pinjamanId);
+      if (relatedPinjaman) {
+        const allRepays = updatedList.filter(a => a.pinjamanId === relatedPinjaman.id);
+        const remainingPrincipal = calculateLoanOutstanding(relatedPinjaman, allRepays);
+        const newStatus = remainingPrincipal <= 0 ? 'Lunas' : 'Belum Lunas';
+        if (relatedPinjaman.status !== newStatus) {
+          const updatedPinjaman = { ...relatedPinjaman, status: newStatus as 'Lunas' | 'Belum Lunas' };
+          setPinjaman(prev => prev.map(p => p.id === relatedPinjaman.id ? updatedPinjaman : p));
+          await saveCollectionItem<Pinjaman>('pinjaman', updatedPinjaman);
+        }
+      }
+
+      alert("Catatan angsuran berhasil diperbarui.");
+    } catch (error) {
+      console.error("handleEditAngsuran failed:", error);
+      // Rollback
+      setAngsuran(prev => prev.map(a => a.id === updated.id ? original : a));
+      alert(`Gagal memperbarui angsuran: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const handleAddIncome = async (newI: Omit<PendapatanLain, 'id'>) => {
     const id = `pe-${Date.now()}`;
     const item: PendapatanLain = { ...newI, id };
     setIncome(prev => [...prev, item]);
     await saveCollectionItem<PendapatanLain>('income', item);
-    triggerSuccessPopup(
-      "Pendapatan Lain Disimpan",
-      "Pencatatan pendapatan/penerimaan kas berhasil dibukukan",
-      [
-        { label: "Uraian / Sumber", value: newI.keterangan },
-        { label: "Nominal", value: newI.nominal, isCurrency: true },
-        { label: "Tanggal", value: newI.tanggal }
-      ]
-    );
   };
 
   const handleAddExpense = async (newE: Omit<BebanKoperasi, 'id'>) => {
@@ -1016,15 +1847,6 @@ export default function App() {
     const item: BebanKoperasi = { ...newE, id };
     setExpenses(prev => [...prev, item]);
     await saveCollectionItem<BebanKoperasi>('expenses', item);
-    triggerSuccessPopup(
-      "Beban / Pengeluaran Disimpan",
-      "Pencatatan beban/pengeluaran kas berhasil dibukukan",
-      [
-        { label: "Uraian Beban", value: newE.keterangan },
-        { label: "Nominal", value: newE.nominal, isCurrency: true },
-        { label: "Tanggal", value: newE.tanggal }
-      ]
-    );
   };
 
   const handleDeleteIncome = async (id: string) => {
@@ -1065,6 +1887,10 @@ export default function App() {
 
   const handleClearArusKas = async () => {
     try {
+      const updatedSetup = { ...setup, kasAwal: 0 };
+      setSetup(updatedSetup);
+      await saveKoperasiSetup(updatedSetup);
+
       await clearCollection('income');
       await clearCollection('expenses');
       setIncome([]);
@@ -1075,24 +1901,10 @@ export default function App() {
   };
 
   const handleAddPembelian = async (newP: Omit<Pembelian, 'id'>) => {
-    if (newP.totalHarga > availableCash) {
-      alert(`Transaksi gagal! Saldo kas tidak mencukupi untuk melakukan pembelian ini.\n\nSaldo Kas Saat Ini: ${formatRupiah(availableCash)}\nTotal Pembelian: ${formatRupiah(newP.totalHarga)}`);
-      return;
-    }
     const id = `pem-${Date.now()}`;
     const item: Pembelian = { ...newP, id };
     setPembelian(prev => [...prev, item]);
     await saveCollectionItem<Pembelian>('pembelian', item);
-    triggerSuccessPopup(
-      "Catatan Pembelian Disimpan",
-      "Pencatatan pembelian aset/persediaan warung telah berhasil dibukukan",
-      [
-        { label: "Nama Barang", value: newP.namaBarang },
-        { label: "Kategori POS", value: newP.kategori.replace('_', ' ').toUpperCase() },
-        { label: "Kuantitas", value: newP.kuantitas },
-        { label: "Total Pembelian", value: newP.totalHarga, isCurrency: true }
-      ]
-    );
   };
 
   const handleDeletePembelian = async (id: string) => {
@@ -1100,36 +1912,11 @@ export default function App() {
     await deleteCollectionItem('pembelian', id);
   };
 
-  const handleUpdatePembelian = async (id: string, updatedP: Omit<Pembelian, 'id'>) => {
-    const item: Pembelian = { ...updatedP, id };
-    setPembelian(prev => prev.map(p => p.id === id ? item : p));
-    await saveCollectionItem<Pembelian>('pembelian', item);
-    triggerSuccessPopup(
-      "Catatan Pembelian Diperbarui",
-      `Data pengadaan "${updatedP.namaBarang}" berhasil disimpan`,
-      [
-        { label: "Nama Barang", value: updatedP.namaBarang },
-        { label: "Total Baru", value: updatedP.totalHarga, isCurrency: true },
-        { label: "Tanggal", value: updatedP.tanggal }
-      ]
-    );
-  };
-
   const handleAddPiutang = async (newP: Omit<PiutangWarung, 'id'>) => {
     const id = `pw-${Date.now()}`;
     const item: PiutangWarung = { ...newP, id };
     setPiutangWarung(prev => [...prev, item]);
     await saveCollectionItem<PiutangWarung>('piutang_warung', item);
-    const m = members.find(m => m.id === newP.anggotaId);
-    triggerSuccessPopup(
-      newP.jenis === 'hutang_baru' ? "Pencatatan Belanja Kredit Berhasil" : "Pelunasan Piutang Berhasil",
-      newP.jenis === 'hutang_baru' ? "Belanja kredit warung berhasil dicatat" : "Pelunasan piutang warung berhasil dicatat",
-      [
-        { label: "Nama Pelanggan", value: m?.nama || "Non-Anggota" },
-        { label: "Nominal", value: newP.nominal, isCurrency: true },
-        { label: "Tanggal", value: newP.tanggal }
-      ]
-    );
   };
 
   const handleDeletePiutang = async (id: string) => {
@@ -1140,6 +1927,142 @@ export default function App() {
   const handleUpdateSetup = async (newSetup: KoperasiSetup) => {
     setSetup(newSetup);
     await saveKoperasiSetup(newSetup);
+  };
+
+  const handleAddUserAccount = async (account: Omit<UserAccount, 'id'>) => {
+    const newAcc: UserAccount = {
+      ...account,
+      id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
+    };
+    setUserAccounts(prev => {
+      const updated = [...prev.filter(u => u.username.toLowerCase() !== newAcc.username.toLowerCase()), newAcc];
+      localStorage.setItem('kop_user_accounts', JSON.stringify(updated));
+      return updated;
+    });
+    try {
+      await saveCollectionItem<UserAccount>('user_accounts', newAcc);
+    } catch (err) {
+      console.warn("Gagal menyimpan akun ke cloud. Disimpan secara lokal.", err);
+    }
+  };
+
+  const handleBatchAddUserAccounts = async (accountsToCreate: Omit<UserAccount, 'id'>[], accountsToUpdate: UserAccount[]) => {
+    const createdWithIds: UserAccount[] = accountsToCreate.map((acc, idx) => ({
+      ...acc,
+      id: `usr-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`
+    }));
+
+    setUserAccounts(prev => {
+      let next = [...prev];
+      for (const updated of accountsToUpdate) {
+        next = next.map(u => u.id === updated.id ? updated : u);
+      }
+      for (const created of createdWithIds) {
+        next = next.filter(u => u.username.toLowerCase() !== created.username.toLowerCase());
+        next.push(created);
+      }
+      localStorage.setItem('kop_user_accounts', JSON.stringify(next));
+      return next;
+    });
+
+    // Save all to Firestore
+    for (const acc of accountsToUpdate) {
+      try {
+        await saveCollectionItem<UserAccount>('user_accounts', acc);
+      } catch (err) {
+        console.warn("Gagal update user account di cloud:", err);
+      }
+    }
+    for (const acc of createdWithIds) {
+      try {
+        await saveCollectionItem<UserAccount>('user_accounts', acc);
+      } catch (err) {
+        console.warn("Gagal save user account ke cloud:", err);
+      }
+    }
+  };
+
+  const handleUpdateUserAccount = async (account: UserAccount) => {
+    setUserAccounts(prev => {
+      const exists = prev.some(u => u.id === account.id || u.username.toLowerCase() === account.username.toLowerCase());
+      const updated = exists 
+        ? prev.map(u => (u.id === account.id || u.username.toLowerCase() === account.username.toLowerCase()) ? account : u)
+        : [account, ...prev];
+      localStorage.setItem('kop_user_accounts', JSON.stringify(updated));
+      return updated;
+    });
+
+    if (currentUserAccount && (
+      currentUserAccount.id === account.id || 
+      currentUserAccount.username.toLowerCase() === account.username.toLowerCase() ||
+      (currentUserAccount.role === 'admin' && account.role === 'admin')
+    )) {
+      const updatedCurr = { ...currentUserAccount, ...account };
+      setCurrentUserAccount(updatedCurr);
+      localStorage.setItem('koperasi_logged_user_account', JSON.stringify(updatedCurr));
+    }
+
+    try {
+      await saveCollectionItem<UserAccount>('user_accounts', account);
+    } catch (err) {
+      console.warn("Gagal memperbarui akun di cloud. Diubah secara lokal.", err);
+    }
+  };
+
+  const handleDeleteUserAccount = async (id: string) => {
+    setUserAccounts(prev => {
+      const updated = prev.filter(u => u.id !== id);
+      localStorage.setItem('kop_user_accounts', JSON.stringify(updated));
+      return updated;
+    });
+    try {
+      await deleteCollectionItem('user_accounts', id);
+    } catch (err) {
+      console.warn("Gagal menghapus akun dari cloud. Dihapus secara lokal.", err);
+    }
+  };
+
+  const handleDeleteAllNonAdminUsers = async () => {
+    const nonAdminAccounts = userAccounts.filter(u => u.role !== 'admin' && u.username.toLowerCase() !== 'admin');
+    if (nonAdminAccounts.length === 0) {
+      alert("Tidak ada akun user (non-admin) yang dapat dihapus.");
+      return;
+    }
+
+    const adminAccounts = userAccounts.filter(u => u.role === 'admin' || u.username.toLowerCase() === 'admin');
+
+    // Update local state and localStorage immediately
+    setUserAccounts(adminAccounts);
+    localStorage.setItem('kop_user_accounts', JSON.stringify(adminAccounts));
+
+    // Delete non-admin accounts from Firestore
+    try {
+      for (const u of nonAdminAccounts) {
+        await deleteCollectionItem('user_accounts', u.id);
+      }
+      
+      // Log to security log
+      const logEntry: Omit<SecurityLog, 'id'> = {
+        timestamp: new Date().toISOString(),
+        userId: currentUserAccount?.id || 'admin',
+        userNama: currentUserAccount?.nama || 'Admin Koperasi',
+        role: 'admin',
+        action: 'Hapus Massal User Anggota (Kecuali Admin)',
+        category: 'Manajemen Anggota',
+        severity: 'danger',
+        description: `Menghapus ${nonAdminAccounts.length} akun user anggota. Menyisakan ${adminAccounts.length} akun admin/pengurus.`,
+        ipAddress: '127.0.0.1 (Web)',
+        userAgent: navigator.userAgent,
+        status: 'SUCCESS',
+        metadata: {
+          totalDeleted: nonAdminAccounts.length,
+          remainingAdmins: adminAccounts.length
+        }
+      };
+      await handleAddSecurityLog(logEntry);
+    } catch (err) {
+      console.warn("Sebagian akun user gagal dihapus dari cloud Firestore:", err);
+    }
   };
 
   const handleSyncFromFirebase = (newData: {
@@ -1277,13 +2200,46 @@ export default function App() {
   };
 
   const handleResetData = async () => {
-    if (!window.confirm("Apakah Anda benar-benar yakin ingin mengosongkan semua data koperasi? Tindakan ini bersifat permanen dan tidak dapat dibatalkan!")) {
+    const inputPin = window.prompt("Masukkan PIN Keamanan untuk mengosongkan semua data koperasi:");
+    if (inputPin === null) return; // User canceled
+    if (inputPin.trim() !== "010203") {
+      alert("PIN Keamanan salah! Akses ditolak.");
       return;
     }
 
+    if (!window.confirm("Apakah Anda benar-benar yakin ingin mengosongkan semua data transaksi & keuangan koperasi? Seluruh saldo, transaksi, simpanan, pinjaman, dan kas akan dikosongkan jadi 0 Rupiah.\n\nCatatan: DATA ANGGOTA TIDAK AKAN DIHAPUS dan tetap dipertahankan. Lanjutkan?")) {
+      return;
+    }
+
+    // Keep members intact
+    const currentMembers = [...members];
+
     localStorage.clear();
-    setSetup(initialSetup);
-    setMembers([]);
+
+    try {
+      if (currentMembers.length > 0) {
+        localStorage.setItem('koperasi_members', JSON.stringify(currentMembers));
+      }
+    } catch (e) {
+      console.error("Gagal simpan backup members ke local storage:", e);
+    }
+
+    const resetSetup: KoperasiSetup = {
+      ...setup,
+      kasAwal: 0,
+      piutangAwal: 0,
+      persediaanWarungAwal: 0,
+      inventarisAwal: 0,
+      akumulasiPenyusutanAwal: 0,
+      simpananPokokAwal: 0,
+      simpananWajibAwal: 0,
+      simpananSukarelaAwal: 0,
+      modalAwal: 0,
+      danaCadanganAwal: 0,
+    };
+
+    setSetup(resetSetup);
+    // DO NOT CLEAR MEMBERS! Keep members
     setSimpanan([]);
     setPinjaman([]);
     setAngsuran([]);
@@ -1296,10 +2252,10 @@ export default function App() {
     setWarungBarang([]);
     setPengurusPengawas([]);
     setGaleriKoperasi([]);
+    setPembayaranPending([]);
 
-    // Clear all Firestore collections to delete existing documents
+    // Clear all Firestore collections EXCEPT members
     try {
-      await clearCollection('members');
       await clearCollection('simpanan');
       await clearCollection('pinjaman');
       await clearCollection('angsuran');
@@ -1312,79 +2268,150 @@ export default function App() {
       await clearCollection('warung_barang');
       await clearCollection('pengurus_pengawas');
       await clearCollection('galeri_koperasi');
+      await clearCollection('pembayaran_pending');
       
       // Also reset/update the setup profile configuration in the cloud
-      await saveKoperasiSetup(initialSetup);
+      await saveKoperasiSetup(resetSetup);
       
-      alert("Semua data koperasi berhasil dikosongkan secara permanen!");
+      alert("Seluruh data transaksi & keuangan koperasi berhasil dikosongkan jadi 0 Rupiah! Data anggota tetap dipertahankan.");
     } catch (err) {
       console.error("Gagal membersihkan koleksi Cloud Firestore saat reset:", err);
       alert("Gagal mengosongkan beberapa koleksi di Cloud Firestore. Silakan coba lagi.");
     }
   };
 
-  // Database loading spinner
-  if (isDbLoading) {
+  // Initial Splash Screen
+  if (showSplash) {
     return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex flex-col items-center justify-center p-4">
-        <div className="relative">
-          <div className="w-12 h-12 rounded-full border-4 border-emerald-500/20 dark:border-emerald-500/10"></div>
-          <div className="absolute top-0 left-0 w-12 h-12 rounded-full border-4 border-emerald-600 border-t-transparent animate-spin"></div>
+      <SplashScreen
+        setup={setup}
+        isLoading={isDbLoading}
+        minimumDuration={1200}
+        onFinish={() => {
+          setShowSplash(false);
+        }}
+      />
+    );
+  }
+
+  const renderPortalPage = (section: 'home' | 'profile' | 'finance' | 'register' | 'login' | 'simulation') => (
+    <PortalKoperasi
+      setup={setup}
+      members={sortedMembers}
+      simpanan={simpanan}
+      pinjaman={pinjaman}
+      angsuran={angsuran}
+      income={income}
+      expenses={expenses}
+      pembelian={pembelian}
+      piutangWarung={piutangWarung}
+      announcements={announcements}
+      warungBarang={warungBarang}
+      pengurusPengawas={pengurusPengawas}
+      galeriKoperasi={galeriKoperasi}
+      userAccounts={userAccounts}
+      rekening={rekening}
+      onAddMember={handleAddMember}
+      onAddExpense={handleAddExpense}
+      onLoginSuccess={handleLoginSuccess}
+      isDarkMode={isDarkMode}
+      setIsDarkMode={setIsDarkMode}
+      initialSection={section}
+      onNavigateSection={(sec) => {
+        if (sec === 'home') navigate('/portal');
+        else if (sec === 'profile') navigate('/portal/profil');
+        else if (sec === 'finance') navigate('/portal/keuangan');
+        else if (sec === 'register') navigate('/portal/pendaftaran');
+        else if (sec === 'simulation') navigate('/portal/simulasi');
+        else if (sec === 'login') navigate('/portal/login');
+      }}
+    />
+  );
+
+  const renderMemberPage = () => {
+    if (!isLoggedIn || userRole !== 'member') {
+      return (
+        <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-6 text-center font-sans">
+          <div className="max-w-md w-full bg-slate-850 p-8 rounded-2xl border border-slate-750 shadow-2xl space-y-5">
+            <div className="w-14 h-14 bg-emerald-500/20 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto">
+              <Lock className="w-7 h-7" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-white">Portal Anggota Terproteksi</h2>
+              <p className="text-xs text-slate-400 mt-2">
+                Silakan masuk terlebih dahulu untuk mengakses saldo simpanan, tagihan pinjaman, dan transaksi Anda.
+              </p>
+            </div>
+            <div className="pt-2 flex flex-col gap-2.5">
+              <button
+                onClick={() => navigate('/login')}
+                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4" /> Masuk ke Akun Anggota
+              </button>
+              <button
+                onClick={() => navigate('/portal')}
+                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs rounded-xl transition cursor-pointer"
+              >
+                Kembali ke Portal Publik
+              </button>
+            </div>
+          </div>
         </div>
-        <p className="mt-4 text-sm font-sans font-semibold tracking-tight text-slate-700 dark:text-slate-300">Menghubungkan Database Cloud Koperasi...</p>
-        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Mengambil data simpan pinjam secara real-time</p>
+      );
+    }
+
+    const activeMember = (loggedMember ? sortedMembers.find(m => m.id === loggedMember.id) : null)
+      || loggedMember
+      || (currentUserAccount?.anggotaId ? sortedMembers.find(m => m.id === currentUserAccount.anggotaId) : null)
+      || (currentUserAccount?.username ? sortedMembers.find(m => m.noAnggota.trim().toLowerCase() === currentUserAccount.username.trim().toLowerCase()) : null)
+      || sortedMembers[0];
+
+    if (activeMember) {
+      return (
+        <MemberDashboardView
+          member={activeMember}
+          setup={setup}
+          members={sortedMembers}
+          simpanan={simpanan}
+          pinjaman={pinjaman}
+          angsuran={angsuran}
+          income={income}
+          expenses={expenses}
+          pembelian={pembelian}
+          piutangWarung={piutangWarung}
+          announcements={announcements}
+          pengajuanPinjaman={pengajuanPinjaman}
+          pembayaranPending={pembayaranPending}
+          galeriKoperasi={galeriKoperasi}
+          userAccounts={userAccounts}
+          onUpdateUserAccount={handleUpdateUserAccount}
+          onUpdateMember={handleEditMember}
+          onAddPengajuanPinjaman={handleAddPengajuanPinjaman}
+          onAddPembayaranPending={handleAddPembayaranPending}
+          onLogout={handleLogout}
+          isDarkMode={isDarkMode}
+          setIsDarkMode={setIsDarkMode}
+        />
+      );
+    }
+
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-6 text-center font-sans">
+        <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <h2 className="text-lg font-bold">Memuat Kabinet Anggota...</h2>
+        <p className="text-xs text-slate-400 mt-1 max-w-sm">
+          Menghubungkan ke data profil anggota koperasi. Jika membutuhkan waktu lama, silakan tekan tombol di bawah.
+        </p>
+        <button 
+          onClick={handleLogout}
+          className="mt-6 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-semibold rounded-lg transition cursor-pointer"
+        >
+          Logout & Kembali
+        </button>
       </div>
     );
-  }
-
-  // Auth gate check
-  if (!isLoggedIn || userRole === null) {
-    return (
-      <PortalKoperasi
-        setup={setup}
-        members={members}
-        simpanan={simpanan}
-        pinjaman={pinjaman}
-        angsuran={angsuran}
-        income={income}
-        expenses={expenses}
-        pembelian={pembelian}
-        piutangWarung={piutangWarung}
-        announcements={announcements}
-        warungBarang={warungBarang}
-        pengurusPengawas={pengurusPengawas}
-        galeriKoperasi={galeriKoperasi}
-        onAddMember={handleAddMember}
-        onLoginSuccess={handleLoginSuccess}
-        isDarkMode={isDarkMode}
-        setIsDarkMode={setIsDarkMode}
-      />
-    );
-  }
-
-  if (userRole === 'member' && loggedMember) {
-    return (
-      <MemberDashboardView
-        member={loggedMember}
-        setup={setup}
-        members={members}
-        simpanan={simpanan}
-        pinjaman={pinjaman}
-        angsuran={angsuran}
-        announcements={announcements}
-        pengajuanPinjaman={pengajuanPinjaman}
-        pembayaranPending={pembayaranPending}
-        galeriKoperasi={galeriKoperasi}
-        onAddPengajuanPinjaman={handleAddPengajuanPinjaman}
-        onAddPembayaranPending={handleAddPembayaranPending}
-        onLogout={handleLogout}
-        isDarkMode={isDarkMode}
-        setIsDarkMode={setIsDarkMode}
-      />
-    );
-  }
-
-  type TabId = 'dashboard' | 'anggota' | 'kasmasuk' | 'pinjaman' | 'aruskas' | 'pembelian' | 'laporan' | 'profil' | 'pengingat' | 'pengumuman' | 'warung' | 'pengurus' | 'galeri';
+  };
 
   interface NavItem {
     id: TabId;
@@ -1392,24 +2419,64 @@ export default function App() {
     icon: React.ComponentType<any>;
   }
 
-  const navItems: NavItem[] = [
+  const allNavItems: NavItem[] = [
     { id: 'dashboard', label: 'Beranda', icon: LayoutDashboard },
     { id: 'anggota', label: 'Data Keanggotaan', icon: Users },
-    { id: 'pengurus', label: 'Pengurus dan Pengawas', icon: Users },
-    { id: 'kasmasuk', label: 'Buku Kas & Mutasi', icon: Wallet },
-    { id: 'pinjaman', label: 'Akad dan Kredit Pinjaman', icon: HandCoins },
-    { id: 'pengingat', label: 'Jadwal & Tagihan', icon: Bell },
-    { id: 'warung', label: 'Unit Usaha Warung', icon: Store },
+    { id: 'kasmasuk', label: 'Kas Masuk', icon: TrendingUp },
+    { id: 'kaskeluar', label: 'Kas Keluar', icon: TrendingDown },
+    { id: 'pengingat', label: 'Jadwal dan Tagihan', icon: Bell },
+    { id: 'warung', label: 'Unit Usaha Warung & POS', icon: Store },
     { id: 'pembelian', label: 'Inventaris', icon: ShoppingCart },
-    { id: 'aruskas', label: 'Pendapatan dan Beban', icon: TrendingUp },
-    { id: 'pengumuman', label: 'Warta & Pengumuman', icon: Megaphone },
-    { id: 'galeri', label: 'Galeri Koperasi', icon: ImageIcon },
     { id: 'laporan', label: 'Laporan Keuangan', icon: Scale },
+    { id: 'anggaran', label: 'Rencana Anggaran (RAPBK)', icon: Target },
+    { id: 'catatan_pengurus', label: 'Catatan Khusus Pengurus', icon: FileSpreadsheet },
+    { id: 'pengumuman', label: 'Pengumuman', icon: Megaphone },
     { id: 'profil', label: 'Profil dan Konfigurasi', icon: UserCog },
+    { id: 'user_mgmt', label: 'Pengaturan Akun dan Akses', icon: KeyRound },
+    { id: 'security_logs', label: 'Log Keamanan Sistem', icon: ShieldCheck },
   ];
 
-  return (
-    <div className="h-screen w-screen overflow-hidden flex bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 transition-colors duration-300 font-sans">
+  const navItems = userRole === 'karyawan_warung'
+    ? allNavItems.filter(item => item.id === 'kasmasuk' || item.id === 'kaskeluar' || item.id === 'warung')
+    : userRole === 'pengawas'
+    ? allNavItems.filter(item => item.id === 'dashboard' || item.id === 'laporan')
+    : allNavItems;
+
+  const renderAdminLayout = (childComponent: React.ReactNode, currentTabId: TabId) => {
+    if (!isLoggedIn || userRole === 'member') {
+      return (
+        <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-6 text-center font-sans">
+          <div className="max-w-md w-full bg-slate-850 p-8 rounded-2xl border border-slate-750 shadow-2xl space-y-5">
+            <div className="w-14 h-14 bg-emerald-500/20 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto">
+              <Lock className="w-7 h-7" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-white">Akses Sistem Administrasi Terproteksi</h2>
+              <p className="text-xs text-slate-400 mt-2">
+                Halaman <strong>/{currentTabId}</strong> memerlukan hak akses Pengurus, Pengawas, atau Karyawan Koperasi.
+              </p>
+            </div>
+            <div className="pt-2 flex flex-col gap-2.5">
+              <button
+                onClick={() => navigate('/login')}
+                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4" /> Masuk ke Akun Admin / Pengurus
+              </button>
+              <button
+                onClick={() => navigate('/portal')}
+                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs rounded-xl transition cursor-pointer"
+              >
+                Kembali ke Portal Publik
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="h-screen w-screen overflow-hidden flex bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 transition-colors duration-300 font-sans">
       
       {/* Left Persistent Sidebar (Desktop View) */}
       <aside className="w-64 bg-emerald-900 text-white flex flex-col shrink-0 hidden lg:flex">
@@ -1436,13 +2503,10 @@ export default function App() {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
             return (
-              <motion.button
+              <button
                 key={item.id}
                 onClick={() => handleNavigation(item.id)}
-                whileHover={{ scale: 1.02, x: 3, boxShadow: "0 4px 12px rgba(0, 0, 0, 0.15)" }}
-                whileTap={{ scale: 0.98 }}
-                transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md font-medium text-[11px] cursor-pointer ${
+                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md font-medium text-[11px] transition duration-150 cursor-pointer ${
                   isActive 
                     ? 'bg-emerald-950 text-white shadow-sm font-bold' 
                     : 'text-emerald-100 hover:bg-emerald-800/60'
@@ -1452,25 +2516,47 @@ export default function App() {
                   <Icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-white' : 'text-emerald-300/85'}`}/>
                   <span className="truncate">{item.label}</span>
                 </div>
-                {item.id === 'pengingat' && dueLoansCount > 0 && (
-                  <span className="bg-rose-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full min-w-[16px] text-center shrink-0">
-                    {dueLoansCount}
-                  </span>
-                )}
-              </motion.button>
+                <div className="flex items-center gap-1 shrink-0">
+                  {item.id === 'kasmasuk' && pendingPembayaranCount > 0 && (
+                    <span 
+                      title={`${pendingPembayaranCount} setoran mandiri anggota perlu validasi`}
+                      className="bg-amber-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[16px] text-center animate-pulse"
+                    >
+                      {pendingPembayaranCount}
+                    </span>
+                  )}
+                  {item.id === 'pinjaman' && pendingPengajuanCount > 0 && (
+                    <span 
+                      title={`${pendingPengajuanCount} pengajuan pinjaman perlu ditinjau`}
+                      className="bg-indigo-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[16px] text-center animate-pulse"
+                    >
+                      {pendingPengajuanCount}
+                    </span>
+                  )}
+                  {item.id === 'pengingat' && dueLoansCount > 0 && (
+                    <span className="bg-rose-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full min-w-[16px] text-center">
+                      {dueLoansCount}
+                    </span>
+                  )}
+                </div>
+              </button>
             );
           })}
         </nav>
 
-        {/* Footer Admin Summary */}
+        {/* Footer User Summary */}
         <div className="p-4 bg-emerald-950 border-t border-emerald-850 shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center font-bold text-xs select-none shadow">
-              {getInitials(setup.namaKoperasi)}
+            <div className={`w-8 h-8 rounded-full ${userRole === 'karyawan_warung' ? 'bg-amber-500 text-slate-950' : 'bg-emerald-500 text-white'} flex items-center justify-center font-bold text-xs select-none shadow`}>
+              {currentUserAccount ? getInitials(currentUserAccount.nama) : (userRole === 'karyawan_warung' ? 'KW' : 'AD')}
             </div>
             <div className="flex-1 overflow-hidden">
-              <p className="text-xs font-semibold truncate leading-tight">Admin Utama</p>
-              <p className="text-[9px] text-emerald-400 truncate mt-0.5">admin@danasegar.com</p>
+              <p className="text-xs font-semibold truncate leading-tight">
+                {currentUserAccount?.nama || (userRole === 'karyawan_warung' ? 'Karyawan Warung' : 'Admin Utama')}
+              </p>
+              <p className="text-[9px] text-emerald-300 truncate mt-0.5">
+                {currentUserAccount?.posisiJabatan || (userRole === 'karyawan_warung' ? 'Kasir / Staf Warung' : 'Pengurus & Admin')}
+              </p>
             </div>
             <button 
               onClick={handleLogout}
@@ -1501,22 +2587,55 @@ export default function App() {
             <svg className="w-3.5 h-3.5 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"/>
             </svg>
-            <span className="text-emerald-600 dark:text-emerald-450 font-bold select-none uppercase tracking-wide text-[10px]">Real-time Overview</span>
+            <span className="text-emerald-600 dark:text-emerald-450 font-bold select-none uppercase tracking-wide text-[10px]">
+              {userRole === 'karyawan_warung' ? 'Kasir Warung Overview' : 'Real-time Overview'}
+            </span>
           </div>
 
           <div className="flex items-center gap-3 sm:gap-4">
-            {/* Search Placeholder */}
-            <div className="relative hidden md:block">
-              <input 
-                type="text" 
-                placeholder="Cari data..." 
-                disabled 
-                className="bg-slate-50 dark:bg-slate-900 border-slate-250 dark:border-slate-700 border rounded-lg py-1 pl-8 pr-3 text-[11px] w-48 outline-none" 
-              />
-              <svg className="w-3.5 h-3.5 absolute left-2.5 top-1.5 text-slate-450" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-              </svg>
-            </div>
+            <PWAInstallButton variant="navbar" appName={setup.namaKoperasi || "Koperasi Dana Segar"} />
+
+            {userRole === 'karyawan_warung' && (
+              <span className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-300 rounded-full text-[10px] font-black border border-amber-300 dark:border-amber-800 shrink-0">
+                <Store className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" /> Akses Karyawan Warung
+              </span>
+            )}
+
+            {/* Active Global Search Bar */}
+            <button
+              onClick={() => setIsGlobalSearchOpen(true)}
+              className="relative hidden md:flex items-center gap-2 bg-slate-50 hover:bg-slate-100 dark:bg-slate-900/90 dark:hover:bg-slate-900 border border-slate-250 dark:border-slate-700 hover:border-emerald-400 dark:hover:border-emerald-500 rounded-lg py-1 pl-8 pr-2.5 text-[11px] text-slate-500 dark:text-slate-400 w-48 text-left transition cursor-pointer shadow-2xs group"
+              title="Cari data di seluruh koperasi (Ctrl + K)"
+            >
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1.5 text-slate-400 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition" />
+              <span className="truncate group-hover:text-slate-800 dark:group-hover:text-slate-200">Cari data...</span>
+              <kbd className="ml-auto font-mono text-[9px] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-1.5 py-0.5 rounded text-slate-400 dark:text-slate-500 shadow-2xs">
+                ⌘K
+              </kbd>
+            </button>
+
+            {/* Mobile Search Button */}
+            <button
+              onClick={() => setIsGlobalSearchOpen(true)}
+              className="md:hidden p-1.5 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition cursor-pointer"
+              title="Cari data"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+
+            {/* Calculator Quick Toggle */}
+            <button 
+              onClick={() => setIsCalculatorOpen(prev => !prev)}
+              title="Kalkulator Koperasi (Popup 600x300 px - Tidak Menutup Menu)"
+              className={`p-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 text-xs font-bold ${
+                isCalculatorOpen 
+                  ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 ring-2 ring-emerald-500' 
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+              }`}
+            >
+              <Calculator className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              <span className="hidden xl:inline text-[11px]">Kalkulator</span>
+            </button>
 
             {/* Theme switcher */}
             <button 
@@ -1530,12 +2649,41 @@ export default function App() {
             <div className="w-px h-5 bg-slate-200 dark:bg-slate-700 hidden sm:block"></div>
 
             {/* Quick Actions */}
-            <button 
-              onClick={() => handleNavigation('kasmasuk')}
-              className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-xs transition cursor-pointer active:scale-95"
-            >
-              <span>+ Kas Masuk</span>
-            </button>
+            {userRole === 'karyawan_warung' ? (
+              <button 
+                onClick={() => handleNavigation('kaskeluar')}
+                className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg shadow-xs transition cursor-pointer active:scale-95"
+              >
+                <span>+ Kas Keluar</span>
+              </button>
+            ) : userRole === 'pengawas' ? (
+              <div className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-lg">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Pengawas</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                {pendingPembayaranCount > 0 && (
+                  <button 
+                    onClick={() => handleNavigation('kasmasuk', 'pembayaran_pending')}
+                    title={`${pendingPembayaranCount} setoran mandiri anggota menunggu validasi kasir/pengurus`}
+                    className="flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg shadow-xs transition cursor-pointer active:scale-95 animate-pulse"
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span className="hidden md:inline">Validasi Setoran</span>
+                    <span className="bg-amber-700 text-[9px] px-1.5 py-0.5 rounded-full font-black">
+                      {pendingPembayaranCount}
+                    </span>
+                  </button>
+                )}
+                <button 
+                  onClick={() => handleNavigation('kasmasuk')}
+                  className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg shadow-xs transition cursor-pointer active:scale-95"
+                >
+                  <span>+ Kas Masuk</span>
+                </button>
+              </div>
+            )}
 
             {/* Logout Admin Button (Visible in header on all viewports) */}
             <button
@@ -1576,16 +2724,13 @@ export default function App() {
                       const Icon = item.icon;
                       const isActive = activeTab === item.id;
                       return (
-                        <motion.button
+                        <button
                           key={item.id}
                           onClick={() => {
                             handleNavigation(item.id);
                             setIsMobileMenuOpen(false);
                           }}
-                          whileHover={{ scale: 1.02, x: 3, boxShadow: "0 4px 10px rgba(0, 0, 0, 0.08)" }}
-                          whileTap={{ scale: 0.98 }}
-                          transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold cursor-pointer ${
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition ${
                             isActive 
                               ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 font-bold' 
                               : 'text-slate-650 dark:text-slate-350 hover:bg-slate-50 dark:hover:bg-slate-800'
@@ -1595,18 +2740,46 @@ export default function App() {
                             <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400 dark:text-slate-500'}`}/>
                             <span className="truncate">{item.label}</span>
                           </div>
-                          {item.id === 'pengingat' && dueLoansCount > 0 && (
-                            <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center shrink-0">
-                              {dueLoansCount}
-                            </span>
-                          )}
-                        </motion.button>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {item.id === 'kasmasuk' && pendingPembayaranCount > 0 && (
+                              <span className="bg-amber-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full min-w-[18px] text-center animate-pulse">
+                                {pendingPembayaranCount}
+                              </span>
+                            )}
+                            {item.id === 'pinjaman' && pendingPengajuanCount > 0 && (
+                              <span className="bg-indigo-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full min-w-[18px] text-center animate-pulse">
+                                {pendingPengajuanCount}
+                              </span>
+                            )}
+                            {item.id === 'pengingat' && dueLoansCount > 0 && (
+                              <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center shrink-0">
+                                {dueLoansCount}
+                              </span>
+                            )}
+                          </div>
+                        </button>
                       );
                     })}
                   </nav>
                 </div>
 
                 <div className="border-t border-slate-150 dark:border-slate-800 pt-4 flex flex-col gap-3">
+                  <div className="flex items-center justify-between px-3 py-2 bg-slate-50 dark:bg-slate-800/80 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+                      {isDarkMode ? <Moon className="w-4 h-4 text-indigo-400" /> : <Sun className="w-4 h-4 text-amber-500" />}
+                      <span>{isDarkMode ? 'Mode Gelap' : 'Mode Terang'}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsDarkMode(!isDarkMode)}
+                      className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 shadow-xs cursor-pointer"
+                    >
+                      Ubah
+                    </button>
+                  </div>
+
+                  <PWAInstallButton variant="drawer" appName={setup.namaKoperasi || "Koperasi Dana Segar"} />
+
                   <button 
                     onClick={() => {
                       setIsMobileMenuOpen(false);
@@ -1631,185 +2804,14 @@ export default function App() {
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 bg-slate-50 dark:bg-slate-900/60">
           <AnimatePresence mode="wait">
             <motion.div
-              key={activeTab}
+              key={currentTabId}
               initial={{ opacity: 0, x: 16 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -16 }}
               transition={{ type: "tween", ease: [0.25, 1, 0.5, 1], duration: 0.28 }}
               className="h-full"
             >
-              {/* Router Render Tab view components */}
-              {activeTab === 'dashboard' && (
-                <DashboardView 
-                  members={members} simpanan={simpanan} pinjaman={pinjaman} 
-                  angsuran={angsuran} income={income} expenses={expenses} 
-                  setup={setup}
-                  announcements={announcements}
-                  pembelian={pembelian}
-                  piutangWarung={piutangWarung}
-                />
-              )}
-
-              {activeTab === 'anggota' && (
-                <AnggotaView 
-                  setup={setup}
-                  pengurusPengawas={pengurusPengawas}
-                  members={members} simpanan={simpanan} pinjaman={pinjaman} angsuran={angsuran}
-                  onAddMember={handleAddMember} onEditMember={handleEditMember} onDeleteMember={handleDeleteMember}
-                  onDeleteAngsuran={handleDeleteAngsuran}
-                  onDeleteSimpanan={handleDeleteSimpanan}
-                  onEditSimpanan={handleEditSimpanan}
-                />
-              )}
-
-              {activeTab === 'kasmasuk' && (
-                <KasMasukView 
-                  setup={setup}
-                  members={members} simpanan={simpanan} pinjaman={pinjaman} angsuran={angsuran}
-                  pembayaranPending={pembayaranPending}
-                  onApprovePembayaranPending={handleApprovePembayaranPending}
-                  onRejectPembayaranPending={handleRejectPembayaranPending}
-                  onAddSimpanan={handleAddSimpanan}
-                  onPostManasukaBunga={handlePostManasukaBunga}
-                  onAddAngsuran={handleAddAngsuran}
-                  onDeleteAngsuran={handleDeleteAngsuran}
-                  onDeleteSimpanan={handleDeleteSimpanan}
-                  onEditSimpanan={handleEditSimpanan}
-                  availableCash={availableCash}
-                />
-              )}
-
-              {activeTab === 'pinjaman' && (
-                <PinjamanView 
-                  setup={setup}
-                  members={members} pinjaman={pinjaman} angsuran={angsuran}
-                  pengajuanPinjaman={pengajuanPinjaman}
-                  onApprovePengajuanPinjaman={handleApprovePengajuanPinjaman}
-                  onRejectPengajuanPinjaman={handleRejectPengajuanPinjaman}
-                  onAddPinjaman={handleAddPinjaman}
-                  onEditPinjaman={handleEditPinjaman}
-                  onDeletePinjaman={handleDeletePinjaman}
-                  availableCash={availableCash}
-                />
-              )}
-
-              {activeTab === 'pembelian' && (
-                <PembelianView 
-                  setup={setup}
-                  pembelian={pembelian}
-                  onAddPembelian={handleAddPembelian}
-                  onDeletePembelian={handleDeletePembelian}
-                  onUpdatePembelian={handleUpdatePembelian}
-                  availableCash={availableCash}
-                />
-              )}
-
-              {activeTab === 'aruskas' && (
-                <ArusKasView 
-                  income={income} expenses={expenses}
-                  onAddIncome={handleAddIncome} onAddExpense={handleAddExpense}
-                  onDeleteIncome={handleDeleteIncome} onDeleteExpense={handleDeleteExpense}
-                  onClearArusKas={handleClearArusKas}
-                  isDarkMode={isDarkMode}
-                />
-              )}
-
-              {activeTab === 'laporan' && (
-                <LaporanView 
-                  members={members} simpanan={simpanan} pinjaman={pinjaman} 
-                  angsuran={angsuran} income={income} expenses={expenses}
-                  pembelian={pembelian} piutangWarung={piutangWarung}
-                  setup={setup}
-                  rekening={rekening}
-                  onSaveRekening={handleSaveRekening}
-                  onDeleteRekening={handleDeleteRekening}
-                  onDeleteAngsuran={handleDeleteAngsuran}
-                  onDeleteSimpanan={handleDeleteSimpanan}
-                  onEditSimpanan={handleEditSimpanan}
-                />
-              )}
-
-              {activeTab === 'pengingat' && (
-                <PengingatView 
-                  members={members}
-                  simpanan={simpanan}
-                  pinjaman={pinjaman}
-                  angsuran={angsuran}
-                  setup={setup}
-                />
-              )}
-
-              {activeTab === 'pengumuman' && (
-                <PengumumanView 
-                  setup={setup}
-                  announcements={announcements}
-                  onAddAnnouncement={handleAddAnnouncement}
-                  onEditAnnouncement={handleEditAnnouncement}
-                  onDeleteAnnouncement={handleDeleteAnnouncement}
-                />
-              )}
-
-              {activeTab === 'profil' && (
-                <ProfilKoperasiView 
-                  setup={setup} 
-                  onUpdateSetup={handleUpdateSetup} 
-                  onResetData={handleResetData}
-                  onSyncFromFirebase={handleSyncFromFirebase}
-                  onImportDatabase={handleImportDatabase}
-                  members={members}
-                  simpanan={simpanan}
-                  pinjaman={pinjaman}
-                  angsuran={angsuran}
-                  income={income}
-                  expenses={expenses}
-                  pembelian={pembelian}
-                  piutangWarung={piutangWarung}
-                  announcements={announcements}
-                  pengajuanPinjaman={pengajuanPinjaman}
-                  warungBarang={warungBarang}
-                  pengurusPengawas={pengurusPengawas}
-                  galeriKoperasi={galeriKoperasi}
-                />
-              )}
-
-              {activeTab === 'warung' && (
-                <AdminWarungView 
-                  warungBarang={warungBarang}
-                  members={members}
-                  piutangWarung={piutangWarung}
-                  onAddBarang={handleAddBarang}
-                  onEditBarang={handleEditBarang}
-                  onDeleteBarang={handleDeleteBarang}
-                  onAddPiutang={handleAddPiutang}
-                  onDeletePiutang={handleDeletePiutang}
-                  pembelian={pembelian}
-                  onAddPembelian={handleAddPembelian}
-                  onDeletePembelian={handleDeletePembelian}
-                  onUpdatePembelian={handleUpdatePembelian}
-                  income={income}
-                  onAddIncome={handleAddIncome}
-                  onDeleteIncome={handleDeleteIncome}
-                  availableCash={availableCash}
-                />
-              )}
-
-              {activeTab === 'pengurus' && (
-                <AdminPengurusView 
-                  pengurusPengawas={pengurusPengawas}
-                  onAddPerson={handleAddPerson}
-                  onEditPerson={handleEditPerson}
-                  onDeletePerson={handleDeletePerson}
-                />
-              )}
-
-              {activeTab === 'galeri' && (
-                <AdminGaleriView 
-                  galeriKoperasi={galeriKoperasi}
-                  onAddGaleri={handleAddGaleri}
-                  onEditGaleri={handleEditGaleri}
-                  onDeleteGaleri={handleDeleteGaleri}
-                />
-              )}
+              {childComponent}
             </motion.div>
           </AnimatePresence>
         </div>
@@ -1916,72 +2918,588 @@ export default function App() {
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
 
-        {/* Universal Success Popup Modal */}
-        {successPopup && successPopup.isOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            {/* Backdrop */}
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setSuccessPopup(null)}
-              className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs"
-            />
-            
-            {/* Modal Box */}
-            <motion.div 
-              initial={{ scale: 0.95, opacity: 0, y: 15 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 15 }}
-              transition={{ type: "spring", duration: 0.4 }}
-              className="relative w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-100 dark:border-slate-800 overflow-hidden z-10 font-sans text-xs"
-            >
-              <div className="h-2 bg-gradient-to-r from-emerald-400 to-teal-500" />
-              
-              <div className="p-6 flex flex-col items-center text-center">
-                <div className="relative mb-4">
-                  <div className="absolute inset-0 rounded-full bg-emerald-100 dark:bg-emerald-950/40 animate-ping opacity-75" />
-                  <div className="relative p-4 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 rounded-full border border-emerald-100 dark:border-emerald-800 shadow-sm">
-                    <Check className="w-8 h-8" />
-                  </div>
-                </div>
+      {/* Floating Popup Calculator (400x200 px) - Does NOT close active menu */}
+      <CalculatorPopup 
+        isOpen={isCalculatorOpen} 
+        onClose={() => setIsCalculatorOpen(false)} 
+      />
 
-                <h3 className="text-sm font-bold text-slate-850 dark:text-slate-50 tracking-tight">
-                  {successPopup.title || "Transaksi Berhasil!"}
-                </h3>
-                {successPopup.subTitle && (
-                  <p className="text-[10px] text-slate-400 mt-1 max-w-[280px] leading-relaxed">
-                    {successPopup.subTitle}
-                  </p>
-                )}
+      {/* Global Interactive Search Modal (Ctrl + K) */}
+      <GlobalSearchModal
+        isOpen={isGlobalSearchOpen}
+        onClose={() => setIsGlobalSearchOpen(false)}
+        onNavigate={handleGlobalNavigate}
+        members={members}
+        simpanan={simpanan}
+        pinjaman={pinjaman}
+        angsuran={angsuran}
+        income={income}
+        expenses={expenses}
+        pembelian={pembelian}
+        piutangWarung={piutangWarung}
+        warungBarang={warungBarang}
+        announcements={announcements}
+        navItems={navItems}
+        isDarkMode={isDarkMode}
+      />
+    </div>
+    );
+  };
 
-                {successPopup.details && successPopup.details.length > 0 && (
-                  <div className="w-full mt-4 bg-slate-50 dark:bg-slate-950/40 rounded-2xl border border-slate-100 dark:border-slate-800/80 p-3.5 space-y-2 text-left">
-                    {successPopup.details.map((detail, idx) => (
-                      <div key={idx} className="flex justify-between items-center gap-4">
-                        <span className="text-slate-450 dark:text-slate-500 font-medium">{detail.label}:</span>
-                        <span className="font-bold text-slate-800 dark:text-slate-200 break-all font-sans">
-                          {detail.isCurrency && typeof detail.value === 'number' 
-                            ? formatRupiah(detail.value) 
-                            : detail.value}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+  return (
+    <>
+      {/* 📡 Offline & Online Fast Caching Connectivity Status Bar */}
+      <OfflineIndicator isDarkMode={isDarkMode} />
 
-                <button
-                  onClick={() => setSuccessPopup(null)}
-                  className="w-full mt-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-bold shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer text-center active:scale-98"
-                >
-                  Selesai
-                </button>
+      {/* ⏱️ Auto Logout When Idle for 2 Minutes (Logout ke Portal Utama) */}
+      <IdleTimeoutHandler
+        isLoggedIn={isLoggedIn}
+        onLogout={handleLogout}
+        timeoutMinutes={2}
+        warningSeconds={20}
+        userName={loggedMember?.nama || currentUserAccount?.nama || (userRole ? userRole.toUpperCase() : undefined)}
+        userRole={userRole}
+      />
+
+      {/* 🔒 Sesi Berakhir Otomatis Notification Banner */}
+      <AnimatePresence>
+        {idleLogoutNotice && (
+          <motion.div
+            initial={{ opacity: 0, y: -25, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            className="fixed top-5 left-1/2 -translate-x-1/2 z-9999 max-w-lg w-[94%] bg-gradient-to-r from-amber-600 to-amber-700 text-white px-4 py-3.5 rounded-2xl shadow-2xl flex items-center justify-between gap-3 border border-amber-400/40"
+            role="alert"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center shrink-0 shadow-xs">
+                <Lock className="w-5 h-5 text-amber-100" />
               </div>
-            </motion.div>
-          </div>
+              <div className="text-xs">
+                <p className="font-bold text-sm leading-tight text-white flex items-center gap-1.5">
+                  <span>Sesi Berakhir Otomatis</span>
+                  <span className="px-1.5 py-0.5 rounded-md bg-white/20 text-[10px] font-mono font-medium">Idle 2 Menit</span>
+                </p>
+                <p className="text-amber-100/90 mt-0.5 leading-snug">
+                  {idleLogoutNotice}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setIdleLogoutNotice(null);
+                try {
+                  sessionStorage.removeItem('koperasi_idle_notice');
+                } catch (e) {}
+              }}
+              className="p-1.5 hover:bg-white/20 rounded-lg text-white/80 hover:text-white transition cursor-pointer shrink-0"
+              title="Tutup Notifikasi"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </motion.div>
         )}
       </AnimatePresence>
-    </div>
+
+      <Routes>
+        {/* Root & Public Portal Independent Multi-Page Routes */}
+        <Route path="/" element={renderPortalPage('home')} />
+        <Route path="/profil" element={renderPortalPage('profile')} />
+        <Route path="/keuangan" element={renderPortalPage('finance')} />
+        <Route path="/pendaftaran" element={renderPortalPage('register')} />
+        <Route path="/simulasi" element={renderPortalPage('simulation')} />
+        <Route path="/login" element={renderPortalPage('login')} />
+
+        {/* Public Route Aliases & Redirects */}
+        <Route path="/portal" element={<Navigate to="/" replace />} />
+        <Route path="/portal/beranda" element={<Navigate to="/" replace />} />
+        <Route path="/beranda" element={<Navigate to="/" replace />} />
+        <Route path="/portal/profil" element={<Navigate to="/profil" replace />} />
+        <Route path="/profil-koperasi" element={<Navigate to="/profil" replace />} />
+        <Route path="/visi-misi" element={<Navigate to="/profil" replace />} />
+        <Route path="/portal/keuangan" element={<Navigate to="/keuangan" replace />} />
+        <Route path="/ikhtisar-keuangan" element={<Navigate to="/keuangan" replace />} />
+        <Route path="/portal/pendaftaran" element={<Navigate to="/pendaftaran" replace />} />
+        <Route path="/register" element={<Navigate to="/pendaftaran" replace />} />
+        <Route path="/portal/simulasi" element={<Navigate to="/simulasi" replace />} />
+        <Route path="/simulasi-pinjaman" element={<Navigate to="/simulasi" replace />} />
+        <Route path="/portal/login" element={<Navigate to="/login" replace />} />
+        <Route path="/masuk" element={<Navigate to="/login" replace />} />
+
+      {/* Member Self-Service Dashboard Routes */}
+      <Route path="/member" element={renderMemberPage()} />
+      <Route path="/member-dashboard" element={renderMemberPage()} />
+
+      {/* Admin Executive & Module Management Routes */}
+      <Route
+        path="/admin"
+        element={renderAdminLayout(
+          <DashboardView 
+            members={sortedMembers} 
+            simpanan={simpanan} 
+            pinjaman={pinjaman} 
+            angsuran={angsuran} 
+            income={income} 
+            expenses={expenses} 
+            setup={setup}
+            announcements={announcements}
+            pembelian={pembelian}
+            piutangWarung={piutangWarung}
+            pembayaranPending={pembayaranPending}
+            pengajuanPinjaman={pengajuanPinjaman}
+            userRole={userRole}
+            onNavigateTab={handleNavigation}
+          />,
+          'dashboard'
+        )}
+      />
+      <Route
+        path="/dashboard"
+        element={renderAdminLayout(
+          <DashboardView 
+            members={sortedMembers} 
+            simpanan={simpanan} 
+            pinjaman={pinjaman} 
+            angsuran={angsuran} 
+            income={income} 
+            expenses={expenses} 
+            setup={setup}
+            announcements={announcements}
+            pembelian={pembelian}
+            piutangWarung={piutangWarung}
+            pembayaranPending={pembayaranPending}
+            pengajuanPinjaman={pengajuanPinjaman}
+            userRole={userRole}
+            onNavigateTab={handleNavigation}
+          />,
+          'dashboard'
+        )}
+      />
+
+      {/* Anggota */}
+      <Route
+        path="/anggota"
+        element={renderAdminLayout(
+          <AnggotaView 
+            setup={setup}
+            pengurusPengawas={pengurusPengawas}
+            members={sortedMembers} simpanan={simpanan} pinjaman={pinjaman} angsuran={angsuran}
+            onAddMember={handleAddMember} onBatchAddMembers={handleBatchAddMembers} onEditMember={handleEditMember} onDeleteMember={handleDeleteMember}
+            onDeleteAngsuran={handleDeleteAngsuran}
+            onDeleteSimpanan={handleDeleteSimpanan}
+            onEditSimpanan={handleEditSimpanan}
+          />,
+          'anggota'
+        )}
+      />
+
+      {/* Kas Masuk & Simpanan */}
+      <Route
+        path="/kasmasuk"
+        element={renderAdminLayout(
+          <KasMasukView 
+            setup={setup}
+            members={sortedMembers} simpanan={simpanan} pinjaman={pinjaman} angsuran={angsuran}
+            income={income}
+            onAddIncome={handleAddIncome}
+            onDeleteIncome={handleDeleteIncome}
+            pembayaranPending={pembayaranPending}
+            onApprovePembayaranPending={handleApprovePembayaranPending}
+            onRejectPembayaranPending={handleRejectPembayaranPending}
+            onAddSimpanan={handleAddSimpanan}
+            onPostManasukaBunga={handlePostManasukaBunga}
+            onAddAngsuran={handleAddAngsuran}
+            onDeleteAngsuran={handleDeleteAngsuran}
+            onDeleteSimpanan={handleDeleteSimpanan}
+            onEditSimpanan={handleEditSimpanan}
+            onEditAngsuran={handleEditAngsuran}
+            availableCash={availableCash}
+            initialActiveTab={kasMasukInitialTab}
+            initialSearchTerm={kasMasukInitialSearch}
+            initialAnggotaId={kasMasukInitialAnggota}
+            onNavigateToPinjaman={handleNavigateToPinjaman}
+            isDarkMode={isDarkMode}
+          />,
+          'kasmasuk'
+        )}
+      />
+      <Route
+        path="/simpanan"
+        element={renderAdminLayout(
+          <KasMasukView 
+            setup={setup}
+            members={sortedMembers} simpanan={simpanan} pinjaman={pinjaman} angsuran={angsuran}
+            income={income}
+            onAddIncome={handleAddIncome}
+            onDeleteIncome={handleDeleteIncome}
+            pembayaranPending={pembayaranPending}
+            onApprovePembayaranPending={handleApprovePembayaranPending}
+            onRejectPembayaranPending={handleRejectPembayaranPending}
+            onAddSimpanan={handleAddSimpanan}
+            onPostManasukaBunga={handlePostManasukaBunga}
+            onAddAngsuran={handleAddAngsuran}
+            onDeleteAngsuran={handleDeleteAngsuran}
+            onDeleteSimpanan={handleDeleteSimpanan}
+            onEditSimpanan={handleEditSimpanan}
+            onEditAngsuran={handleEditAngsuran}
+            availableCash={availableCash}
+            initialActiveTab={'simpanan'}
+            initialSearchTerm={kasMasukInitialSearch}
+            initialAnggotaId={kasMasukInitialAnggota}
+            onNavigateToPinjaman={handleNavigateToPinjaman}
+            isDarkMode={isDarkMode}
+          />,
+          'kasmasuk'
+        )}
+      />
+
+      {/* Kas Keluar */}
+      <Route
+        path="/kaskeluar"
+        element={renderAdminLayout(
+          <KasKeluarView
+            setup={setup}
+            pengurusPengawas={pengurusPengawas}
+            members={sortedMembers}
+            expenses={expenses}
+            pinjaman={pinjaman}
+            angsuran={angsuran}
+            simpanan={simpanan}
+            pembelian={pembelian}
+            piutangWarung={piutangWarung}
+            onAddExpense={handleAddExpense}
+            onDeleteExpense={handleDeleteExpense}
+            onAddPinjaman={handleAddPinjaman}
+            onEditPinjaman={handleEditPinjaman}
+            onDeletePinjaman={handleDeletePinjaman}
+            pengajuanPinjaman={pengajuanPinjaman}
+            onApprovePengajuanPinjaman={handleApprovePengajuanPinjaman}
+            onRejectPengajuanPinjaman={handleRejectPengajuanPinjaman}
+            onAddSimpanan={handleAddSimpanan}
+            onAddPembelian={handleAddPembelian}
+            onDeletePembelian={handleDeletePembelian}
+            availableCash={availableCash}
+            initialActiveTab={kasKeluarInitialTab}
+            initialLoanSearchTerm={pinjamanInitialSearch}
+            initialLoanAnggotaId={pinjamanInitialAnggota}
+            initialLoanId={pinjamanInitialId}
+            onNavigateToAngsuran={handleNavigateToAngsuran}
+            isDarkMode={isDarkMode}
+          />,
+          'kaskeluar'
+        )}
+      />
+      <Route
+        path="/beban"
+        element={<Navigate to="/kaskeluar" replace />}
+      />
+
+      {/* Pinjaman -> Sub-menu / tab pada Kas Keluar */}
+      <Route
+        path="/pinjaman"
+        element={<Navigate to="/kaskeluar" replace />}
+      />
+
+      {/* Jadwal & Tagihan */}
+      <Route
+        path="/pengingat"
+        element={renderAdminLayout(
+          <PengingatView 
+            members={sortedMembers}
+            simpanan={simpanan}
+            pinjaman={pinjaman}
+            angsuran={angsuran}
+            piutangWarung={piutangWarung}
+            setup={setup}
+            whatsAppLogs={whatsAppLogs}
+            onSaveWhatsAppLog={handleSaveWhatsAppLog}
+            onDeleteWhatsAppLog={handleDeleteWhatsAppLog}
+            onNavigateToPinjaman={handleNavigateToPinjaman}
+          />,
+          'pengingat'
+        )}
+      />
+
+      {/* Unit Usaha Warung */}
+      <Route
+        path="/warung"
+        element={renderAdminLayout(
+          <AdminWarungView 
+            warungBarang={warungBarang}
+            members={sortedMembers}
+            piutangWarung={piutangWarung}
+            onAddBarang={handleAddBarang}
+            onEditBarang={handleEditBarang}
+            onDeleteBarang={handleDeleteBarang}
+            onAddPiutang={handleAddPiutang}
+            onDeletePiutang={handleDeletePiutang}
+            pembelian={pembelian}
+            onAddPembelian={handleAddPembelian}
+            onDeletePembelian={handleDeletePembelian}
+            income={income}
+            onAddIncome={handleAddIncome}
+            onDeleteIncome={handleDeleteIncome}
+            simpanan={simpanan}
+            pinjaman={pinjaman}
+            angsuran={angsuran}
+            setup={setup}
+            currentUserAccount={currentUserAccount}
+          />,
+          'warung'
+        )}
+      />
+
+      {/* Pembelian & Inventaris */}
+      <Route
+        path="/pembelian"
+        element={renderAdminLayout(
+          <PembelianView 
+            setup={setup}
+            pembelian={pembelian}
+            onAddPembelian={handleAddPembelian}
+            onDeletePembelian={handleDeletePembelian}
+          />,
+          'pembelian'
+        )}
+      />
+
+      {/* Arus Kas & Buku Besar -> Dihapus dari navigasi */}
+      <Route
+        path="/aruskas"
+        element={<Navigate to="/kaskeluar" replace />}
+      />
+      <Route
+        path="/bukubesar"
+        element={<Navigate to="/laporan" replace />}
+      />
+
+      {/* Laporan & SHU */}
+      <Route
+        path="/laporan"
+        element={renderAdminLayout(
+          <LaporanView 
+            members={sortedMembers} simpanan={simpanan} pinjaman={pinjaman} 
+            angsuran={angsuran} income={income} expenses={expenses}
+            pembelian={pembelian} piutangWarung={piutangWarung}
+            setup={setup}
+            rekening={rekening}
+            onSaveRekening={handleSaveRekening}
+            onDeleteRekening={handleDeleteRekening}
+            onDeleteAngsuran={handleDeleteAngsuran}
+            onDeleteSimpanan={handleDeleteSimpanan}
+            onEditSimpanan={handleEditSimpanan}
+            onEditAngsuran={handleEditAngsuran}
+            onUpdateSetup={handleUpdateSetup}
+            onNavigateToAngsuran={handleNavigateToAngsuran}
+            onNavigateToPinjaman={handleNavigateToPinjaman}
+            userRole={userRole}
+            shuDistributions={shuDistributions}
+            onAddSHUDistribution={handleAddSHUDistribution}
+          />,
+          'laporan'
+        )}
+      />
+
+      {/* Rencana Anggaran (RAPBK) */}
+      <Route
+        path="/anggaran"
+        element={renderAdminLayout(
+          <AdminAnggaranView 
+            setup={setup}
+            anggaranList={anggaranRAPBK}
+            rapbkSettings={rapbkSettings}
+            income={income}
+            expenses={expenses}
+            pinjaman={pinjaman}
+            angsuran={angsuran}
+            pembelian={pembelian}
+            piutangWarung={piutangWarung}
+            members={sortedMembers}
+            onAddOrUpdateItem={handleAddOrUpdateAnggaranItem}
+            onDeleteItem={handleDeleteAnggaranItem}
+            onUpdateSetting={handleUpdateRAPBKSetting}
+            onLoadStandardTemplate={handleLoadStandardRAPBKTemplate}
+            isDarkMode={isDarkMode}
+          />,
+          'anggaran'
+        )}
+      />
+      <Route
+        path="/rapbk"
+        element={<Navigate to="/anggaran" replace />}
+      />
+
+      {/* Catatan Khusus Pengurus (Spreadsheet Excel) */}
+      <Route
+        path="/catatan-pengurus"
+        element={renderAdminLayout(
+          <CatatanKhususPengurusView 
+            setup={setup}
+            availableCash={availableCash}
+            currentUserAccount={currentUserAccount}
+            isDarkMode={isDarkMode}
+          />,
+          'catatan_pengurus'
+        )}
+      />
+      <Route
+        path="/catatan_pengurus"
+        element={<Navigate to="/catatan-pengurus" replace />}
+      />
+      <Route
+        path="/catatan"
+        element={<Navigate to="/catatan-pengurus" replace />}
+      />
+      <Route
+        path="/spreadsheet"
+        element={<Navigate to="/catatan-pengurus" replace />}
+      />
+
+      {/* Pengurus & Pengawas -> Dipindahkan ke dalam Profil & Konfigurasi */}
+      <Route
+        path="/pengurus"
+        element={<Navigate to="/pengaturan" replace />}
+      />
+
+      {/* Pengumuman */}
+      <Route
+        path="/pengumuman"
+        element={renderAdminLayout(
+          <PengumumanView 
+            setup={setup}
+            announcements={announcements}
+            onAddAnnouncement={handleAddAnnouncement}
+            onEditAnnouncement={handleEditAnnouncement}
+            onDeleteAnnouncement={handleDeleteAnnouncement}
+          />,
+          'pengumuman'
+        )}
+      />
+
+      {/* Galeri Koperasi */}
+      <Route
+        path="/galeri"
+        element={renderAdminLayout(
+          <AdminGaleriView 
+            galeriKoperasi={galeriKoperasi}
+            onAddGaleri={handleAddGaleri}
+            onEditGaleri={handleEditGaleri}
+            onDeleteGaleri={handleDeleteGaleri}
+          />,
+          'galeri'
+        )}
+      />
+
+      {/* Profil & Konfigurasi Koperasi (Admin) */}
+      <Route
+        path="/pengaturan"
+        element={renderAdminLayout(
+          <ProfilKoperasiView 
+            setup={setup} 
+            onUpdateSetup={handleUpdateSetup} 
+            onResetData={handleResetData}
+            onSyncFromFirebase={handleSyncFromFirebase}
+            onImportDatabase={handleImportDatabase}
+            members={sortedMembers}
+            simpanan={simpanan}
+            pinjaman={pinjaman}
+            angsuran={angsuran}
+            income={income}
+            expenses={expenses}
+            pembelian={pembelian}
+            piutangWarung={piutangWarung}
+            announcements={announcements}
+            pengajuanPinjaman={pengajuanPinjaman}
+            warungBarang={warungBarang}
+            pengurusPengawas={pengurusPengawas}
+            onAddPerson={handleAddPerson}
+            onEditPerson={handleEditPerson}
+            onDeletePerson={handleDeletePerson}
+            galeriKoperasi={galeriKoperasi}
+          />,
+          'profil'
+        )}
+      />
+      <Route
+        path="/konfigurasi"
+        element={<Navigate to="/pengaturan" replace />}
+      />
+      <Route
+        path="/admin/profil"
+        element={<Navigate to="/pengaturan" replace />}
+      />
+
+      {/* User & Access Management */}
+      <Route
+        path="/user-mgmt"
+        element={renderAdminLayout(
+          <AdminUserManagementView
+            setup={setup}
+            userAccounts={userAccounts}
+            currentUserAccount={currentUserAccount}
+            members={sortedMembers}
+            onAddUserAccount={handleAddUserAccount}
+            onBatchAddUserAccounts={handleBatchAddUserAccounts}
+            onUpdateUserAccount={handleUpdateUserAccount}
+            onDeleteUserAccount={handleDeleteUserAccount}
+            onDeleteAllNonAdminUsers={handleDeleteAllNonAdminUsers}
+          />,
+          'user_mgmt'
+        )}
+      />
+      <Route
+        path="/users"
+        element={renderAdminLayout(
+          <AdminUserManagementView
+            setup={setup}
+            userAccounts={userAccounts}
+            currentUserAccount={currentUserAccount}
+            members={sortedMembers}
+            onAddUserAccount={handleAddUserAccount}
+            onBatchAddUserAccounts={handleBatchAddUserAccounts}
+            onUpdateUserAccount={handleUpdateUserAccount}
+            onDeleteUserAccount={handleDeleteUserAccount}
+            onDeleteAllNonAdminUsers={handleDeleteAllNonAdminUsers}
+          />,
+          'user_mgmt'
+        )}
+      />
+
+      {/* Security Logs */}
+      <Route
+        path="/security-logs"
+        element={renderAdminLayout(
+          <AdminSecurityLogsView
+            setup={setup}
+            securityLogs={securityLogs}
+            members={sortedMembers}
+            userAccounts={userAccounts}
+            onAddSecurityLog={handleAddSecurityLog}
+            onClearSecurityLogs={handleClearSecurityLogs}
+          />,
+          'security_logs'
+        )}
+      />
+      <Route
+        path="/logs"
+        element={renderAdminLayout(
+          <AdminSecurityLogsView
+            setup={setup}
+            securityLogs={securityLogs}
+            members={sortedMembers}
+            userAccounts={userAccounts}
+            onAddSecurityLog={handleAddSecurityLog}
+            onClearSecurityLogs={handleClearSecurityLogs}
+          />,
+          'security_logs'
+        )}
+      />
+
+      {/* Catch-all route */}
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+    </>
   );
 }

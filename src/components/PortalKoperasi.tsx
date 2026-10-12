@@ -11,7 +11,8 @@ import {
   Shield, ShieldCheck, ShieldAlert, LogIn, User, Lock, Printer, Clock, FileText, CheckCircle2, XCircle,
   AlertCircle, X, ChevronRight, Phone, MapPin, Send, HelpCircle, LogOut, Download, Menu, Megaphone, Calendar,
   Eye, EyeOff, Store, Upload, Image as ImageIcon, KeyRound, UserCog, UserCheck, Camera, Edit3, MessageSquare,
-  Copy, Check, Receipt, ArrowUpRight, CreditCard, Sun, Moon, Sparkles, ChevronDown, ChevronUp
+  Copy, Check, Receipt, ArrowUpRight, CreditCard, Sun, Moon, Sparkles, ChevronDown, ChevronUp,
+  QrCode
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { SlideshowGaleri } from './SlideshowGaleri';
@@ -19,6 +20,7 @@ import { compressImage } from '../utils/imageCompressor';
 import { PortalGrafikLabaBulanan } from './PortalGrafikLabaBulanan';
 import { PWAInstallButton } from './PWAInstallButton';
 import { AnnouncementPopupModal } from './AnnouncementPopupModal';
+import { DigitalMemberCardModal } from './DigitalMemberCardModal';
 
 // ================= TYPES & INTERFACES =================
 interface PortalKoperasiProps {
@@ -423,13 +425,21 @@ export function PortalKoperasi({
     let danaCadanganVal = setup?.danaCadanganAwal || 0;
     let shuBerjalanVal = finances.netProfit;
 
+    const isSHUExpense = (e: BebanKoperasi) => {
+      const cat = (e.kategori || '').toLowerCase();
+      const ket = (e.keterangan || '').toLowerCase();
+      return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+    };
+    const totalSHUDisbursed = (expenses || []).filter(isSHUExpense).reduce((sum, e) => sum + e.nominal, 0);
+
     if (shuDistributions && shuDistributions.length > 0) {
-      danaCadanganVal += shuDistributions.reduce((a, d) => a + d.danaCadanganNominal, 0);
-      shuBerjalanVal = Math.max(0, finances.netProfit - shuDistributions.reduce((a, d) => a + (d.shuAnggotaNominal + d.shuPengurusNominal + d.shuPengawasNominal), 0));
+      const distCadangan = shuDistributions.reduce((a, d) => a + d.danaCadanganNominal, 0);
+      danaCadanganVal += distCadangan;
+      shuBerjalanVal = finances.netProfit - distCadangan - totalSHUDisbursed;
     } else if (finances.netProfit > 0) {
       const cadangan = Math.round(finances.netProfit * 0.20);
       danaCadanganVal += cadangan;
-      shuBerjalanVal = finances.netProfit - cadangan;
+      shuBerjalanVal = finances.netProfit - cadangan - totalSHUDisbursed;
     }
 
     const customPasivaList = (rekening || []).filter(r => r.kategori === 'Pasiva');
@@ -850,28 +860,29 @@ export function PortalKoperasi({
 
     if (onAddExpense) {
       const today = new Date().toISOString().substring(0, 10);
+      const activeTahunBuku = `${new Date().getFullYear()}`;
       if (shuAnggotaNominal > 0) {
         await onAddExpense({
           tanggal: today,
-          kategori: 'beban_lain',
+          kategori: 'pencairan_shu',
           nominal: shuAnggotaNominal,
-          keterangan: `Pembagian SHU Bagian Anggota (${persenAnggota}%)`
+          keterangan: `Pembagian SHU Bagian Anggota (${persenAnggota}%) - Tahun Buku ${activeTahunBuku}`
         });
       }
       if (shuPengurusNominal > 0) {
         await onAddExpense({
           tanggal: today,
-          kategori: 'gaji_pengurus',
+          kategori: 'pencairan_shu',
           nominal: shuPengurusNominal,
-          keterangan: `Pembagian SHU Bagian Pengurus (${persenPengurus}%)`
+          keterangan: `Pembagian SHU Bagian Pengurus (${persenPengurus}%) - Tahun Buku ${activeTahunBuku}`
         });
       }
       if (shuPengawasNominal > 0) {
         await onAddExpense({
           tanggal: today,
-          kategori: 'gaji_pengawas',
+          kategori: 'pencairan_shu',
           nominal: shuPengawasNominal,
-          keterangan: `Pembagian SHU Bagian Pengawas (${persenPengawas}%)`
+          keterangan: `Pembagian SHU Bagian Pengawas (${persenPengawas}%) - Tahun Buku ${activeTahunBuku}`
         });
       }
     }
@@ -2459,6 +2470,7 @@ export function MemberDashboardView({
 
   // Password change states for member
   const [isPassModalOpen, setIsPassModalOpen] = useState(false);
+  const [showDigitalCardModal, setShowDigitalCardModal] = useState(false);
   const [newPass, setNewPass] = useState('');
   const [confirmPass, setConfirmPass] = useState('');
   const [passMsg, setPassMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -3788,6 +3800,14 @@ export function MemberDashboardView({
           
           <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
             <button 
+              onClick={() => setShowDigitalCardModal(true)}
+              className="px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-xl text-xs font-black shadow-md hover:shadow-lg transition flex items-center gap-1.5 cursor-pointer active:scale-95 border border-amber-400"
+              title="Buka Kartu Anggota Digital, Unduh Gambar / PDF & QR Code Cepat"
+            >
+              <CreditCard className="w-4 h-4 text-amber-100" />
+              <span>Kartu Digital (KTA)</span>
+            </button>
+            <button 
               onClick={openEditProfileModal}
               className={`px-4 py-2 ${theme.bannerBtn} rounded-xl text-xs font-black shadow-sm transition flex items-center gap-1.5 cursor-pointer`}
             >
@@ -4287,6 +4307,45 @@ export function MemberDashboardView({
                   </div>
                 </div>
               )}
+
+              {/* WIDGET KARTU ANGGOTA DIGITAL (KTA RESMI DENGAN QR CODE) */}
+              <div className="bg-gradient-to-br from-emerald-900 via-teal-900 to-slate-900 text-white rounded-3xl p-5 sm:p-6 border border-emerald-600/40 shadow-xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 -mr-16 -mt-16 w-56 h-56 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                <div className="flex flex-col lg:flex-row items-center justify-between gap-6 relative z-10">
+                  <div className="flex items-start sm:items-center gap-4 sm:gap-5 w-full lg:w-auto">
+                    <div className="p-3.5 sm:p-4 bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shrink-0 text-emerald-300 shadow-inner">
+                      <CreditCard className="w-8 h-8 sm:w-10 sm:h-10 text-emerald-300" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/30 text-emerald-200 border border-emerald-400/40 text-[10px] font-black uppercase tracking-wider">
+                          KTA ELEKTRONIK RESMI
+                        </span>
+                        <span className="text-[11px] font-mono text-emerald-300/80">
+                          No: {member.noAnggota}
+                        </span>
+                      </div>
+                      <h3 className="text-base sm:text-lg font-black text-white">
+                        Kartu Anggota Digital (KTA) Anda Siap Digunakan
+                      </h3>
+                      <p className="text-xs text-emerald-100/80 max-w-xl leading-relaxed">
+                        Tunjukkan QR Code atau Barcode kartu ini saat berbelanja di kasir warung POS koperasi atau bertransaksi simpanan. Kasir akan men-scan kode Anda secara instan tanpa perlu mencari nama manual.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2.5 w-full lg:w-auto justify-end flex-wrap sm:flex-nowrap shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setShowDigitalCardModal(true)}
+                      className="w-full sm:w-auto px-5 py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-2xl shadow-lg hover:shadow-emerald-500/30 transition flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                    >
+                      <QrCode className="w-4 h-4 text-slate-950" />
+                      <span>Buka & Unduh KTA (PDF / PNG)</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
 
               {/* Info Penarikan Simpanan Manasuka */}
               <div className="bg-emerald-50/20 dark:bg-emerald-950/10 border border-emerald-100/50 dark:border-emerald-900/30 p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-2xs">
@@ -6554,6 +6613,17 @@ export function MemberDashboardView({
             </div>
           )}
         </AnimatePresence>
+
+        {/* MODAL KARTU ANGGOTA DIGITAL (KTA RESMI) */}
+        {showDigitalCardModal && member && (
+          <DigitalMemberCardModal
+            isOpen={showDigitalCardModal}
+            onClose={() => setShowDigitalCardModal(false)}
+            member={member}
+            allMembers={members}
+            setup={setup}
+          />
+        )}
       </main>
     </div>
   );

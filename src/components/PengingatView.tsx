@@ -8,7 +8,8 @@ import {
   PiutangWarung, 
   WhatsAppLog 
 } from '../types';
-import { formatRupiah, terbilang } from '../utils/finance';
+import { formatRupiah, terbilang, isSimpananMatchingMonth } from '../utils/finance';
+import { KalenderSimpananWajib } from './KalenderSimpananWajib';
 import { 
   Bell, MessageSquare, Send, Calendar, AlertCircle, CheckCircle2, 
   User, Wallet, Filter, Clock, ArrowUpRight, Search, Sparkles, 
@@ -105,9 +106,7 @@ export function getMemberUnpaidWajibDetails(
 
   const memberWajibPayments = simpananList.filter(s => {
     if (s.anggotaId !== member.id || s.jenis !== 'Wajib') return false;
-    if (!s.tanggal) return false;
-    const sDate = new Date(s.tanggal);
-    return sDate.getFullYear() === targetYear;
+    return true;
   });
 
   const totalPaidWajib = memberWajibPayments.reduce((sum, s) => sum + (Number(s.jumlah) || 0), 0);
@@ -116,11 +115,18 @@ export function getMemberUnpaidWajibDetails(
   const unpaidMonths: { month: number; monthName: string; year: number }[] = [];
 
   for (let m = fromMonth; m <= toMonth; m++) {
+    const ymStr = `${targetYear}-${String(m).padStart(2, '0')}`;
     const monthIndexInRange = m - fromMonth;
 
     const paidInThisMonth = memberWajibPayments.some(s => {
-      const sDate = new Date(s.tanggal);
-      return (sDate.getMonth() + 1 === m) && (Number(s.jumlah) >= nominalPerBulan);
+      if (isSimpananMatchingMonth(s, ymStr)) {
+        return Number(s.jumlah) >= nominalPerBulan;
+      }
+      if (s.tanggal) {
+        const sDate = new Date(s.tanggal);
+        return (sDate.getFullYear() === targetYear) && (sDate.getMonth() + 1 === m) && (Number(s.jumlah) >= nominalPerBulan);
+      }
+      return false;
     });
 
     const isCoveredByCumulative = monthIndexInRange < monthsCoveredCount;
@@ -178,6 +184,7 @@ export function PengingatView({
     jenisPesan?: WhatsAppLog['jenisPesan'];
   } | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
+  const [calendarModalMember, setCalendarModalMember] = useState<Member | null>(null);
 
   useEffect(() => {
     if (activeReminder) {
@@ -1030,6 +1037,14 @@ _Simpan pesan ini sebagai bukti pembayaran Anda._
                         <td className="p-3.5 text-center">
                           <div className="flex items-center justify-center gap-1.5">
                             <button
+                              type="button"
+                              onClick={() => setCalendarModalMember(item.member)}
+                              className="p-2 border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 rounded-xl transition cursor-pointer"
+                              title="Buka Kalender Iuran Simpanan Wajib 12 Bulan"
+                            >
+                              <Calendar className="w-3.5 h-3.5" />
+                            </button>
+                            <button
                               onClick={() => handleCopyMessage(item.messagePreview, { name: item.member.nama, anggotaId: item.member.id, phone: item.member.noHp, jenisPesan: 'Tagihan Simpanan Wajib' })}
                               className="p-2 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-600 dark:text-slate-300 rounded-xl transition cursor-pointer"
                               title="Salin Teks Pesan"
@@ -1726,6 +1741,59 @@ _Simpan pesan ini sebagai bukti pembayaran Anda._
                 >
                   <Send className="w-3.5 h-3.5" />
                   Kirim ke WhatsApp
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+        {/* MODAL KALENDER SIMPANAN WAJIB */}
+        {calendarModalMember && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 bg-indigo-50 dark:bg-indigo-950/40 rounded-xl text-indigo-600 dark:text-indigo-400">
+                    <Calendar className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100">
+                      Kalender Iuran Simpanan Wajib
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {calendarModalMember.nama} ({calendarModalMember.noAnggota})
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCalendarModalMember(null)}
+                  className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <KalenderSimpananWajib
+                memberId={calendarModalMember.id}
+                memberNama={calendarModalMember.nama}
+                memberNoAnggota={calendarModalMember.noAnggota}
+                simpananList={simpanan}
+                nominalWajib={expectedWajibNominal}
+                selectedMonthYM={`${targetYear}-${String(targetMonth).padStart(2, '0')}`}
+              />
+
+              <div className="flex justify-end pt-2 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setCalendarModalMember(null)}
+                  className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold rounded-xl cursor-pointer transition text-xs"
+                >
+                  Tutup
                 </button>
               </div>
             </motion.div>

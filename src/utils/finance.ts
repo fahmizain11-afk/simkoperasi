@@ -56,6 +56,97 @@ export const formatYearMonthIndo = (ym: string): string => {
   return `${monthName} ${year}`;
 };
 
+// Helper untuk mengecek kecocokan transaksi Simpanan Wajib dengan periode bulan (format "YYYY-MM")
+export const isSimpananMatchingMonth = (s: Simpanan, targetYM: string): boolean => {
+  if (s.jenis !== 'Wajib') return false;
+  // 1. Cek properti periodeBulan spesifik (bisa tunggal atau dipisahkan koma)
+  if (s.periodeBulan) {
+    const periods = s.periodeBulan.split(',').map(p => p.trim());
+    if (periods.includes(targetYM)) return true;
+  }
+  // 2. Cek properti teks bulan spesifik
+  if (s.bulan) {
+    const formattedTarget = formatYearMonthIndo(targetYM).toLowerCase();
+    if (s.bulan.toLowerCase().includes(formattedTarget)) return true;
+  }
+  // 3. Cek keterangan jika menyebut nama bulan & tahun
+  if (s.keterangan) {
+    const formattedTarget = formatYearMonthIndo(targetYM).toLowerCase();
+    if (s.keterangan.toLowerCase().includes(formattedTarget)) return true;
+  }
+  // 4. Fallback ke tanggal transaksi jika periodeBulan belum diisi
+  if (!s.periodeBulan && !s.bulan && s.tanggal) {
+    if (s.tanggal.startsWith(targetYM)) return true;
+  }
+  return false;
+};
+
+// Helper rekap status pembayaran Simpanan Wajib per anggota untuk periode bulan tertentu
+export const getMemberWajibMonthStatus = (
+  memberOrId: string | Member,
+  simpananList: Simpanan[],
+  targetYM: string,
+  expectedNominal: number = 50000
+) => {
+  const mId = typeof memberOrId === 'string' ? memberOrId : memberOrId.id;
+  const matchingPayments = (simpananList || []).filter(
+    s => s.anggotaId === mId && isSimpananMatchingMonth(s, targetYM)
+  );
+  const totalPaid = matchingPayments.reduce((sum, s) => sum + (Number(s.jumlah) || 0), 0);
+  const isPaid = totalPaid >= (expectedNominal > 0 ? expectedNominal : 50000);
+  const latestPayment = matchingPayments.length > 0 ? matchingPayments[matchingPayments.length - 1] : undefined;
+
+  return {
+    isPaid,
+    totalPaid,
+    payments: matchingPayments,
+    latestPayment,
+    paymentDate: latestPayment?.tanggal,
+    transactionId: latestPayment?.transaksiId || latestPayment?.id
+  };
+};
+
+// Helper untuk mencari bulan Simpanan Wajib pertama yang BELUM DIBAYAR oleh anggota
+export const getEarliestUnpaidWajibMonth = (
+  memberOrId: string | Member,
+  simpananList: Simpanan[],
+  expectedNominal: number = 50000,
+  referenceDate: Date = new Date()
+): string => {
+  const currentYear = referenceDate.getFullYear();
+  const currentMonth = referenceDate.getMonth() + 1;
+
+  // 1. Cek dari 1 tahun ke belakang sampai bulan ini untuk mencari tunggakan
+  for (let y = currentYear - 1; y <= currentYear; y++) {
+    for (let m = 1; m <= 12; m++) {
+      if (y === currentYear && m > currentMonth) break;
+      const ym = `${y}-${String(m).padStart(2, '0')}`;
+      const status = getMemberWajibMonthStatus(memberOrId, simpananList, ym, expectedNominal);
+      if (!status.isPaid) {
+        return ym;
+      }
+    }
+  }
+
+  // 2. Jika sampai bulan berjalan sudah lunas, cari bulan masa depan pertama yang belum dibayar
+  let y = currentYear;
+  let m = currentMonth + 1;
+  while (y <= currentYear + 3) {
+    const ym = `${y}-${String(m).padStart(2, '0')}`;
+    const status = getMemberWajibMonthStatus(memberOrId, simpananList, ym, expectedNominal);
+    if (!status.isPaid) {
+      return ym;
+    }
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
+    }
+  }
+
+  return `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+};
+
 // Excel Exporter
 export const exportToExcel = (data: any[], sheetName: string, fileName: string, setup?: KoperasiSetup) => {
   try {

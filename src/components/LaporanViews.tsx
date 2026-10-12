@@ -13,7 +13,11 @@ import {
   calculateKasKoperasi,
   calculateMonthlyCashFlowSummaries,
   UnifiedMonthlyCashFlowItem,
-  DetailedCashMutationItem
+  DetailedCashMutationItem,
+  formatYearMonthIndo,
+  INDO_MONTH_NAMES,
+  isSimpananMatchingMonth,
+  getMemberWajibMonthStatus
 } from '../utils/finance';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -25,12 +29,14 @@ import {
   Search, Coins, CreditCard, Receipt, Bell, Clock, MessageSquare, AlertTriangle, Megaphone, Trash2, Edit, Edit3, Plus, Save,
   Award, Lightbulb, ShoppingBag, ArrowUpRight, ArrowDownLeft, AlertOctagon, Printer, Wallet, Send, X,
   UserCheck, UserPlus, ArrowRight, ShieldCheck, Check, ChevronRight, FileCheck, Landmark, FileText,
-  ArrowUpDown, Filter, Eye, ListFilter, ExternalLink, SlidersHorizontal, Sparkles, Percent, Info
+  ArrowUpDown, Filter, Eye, ListFilter, ExternalLink, SlidersHorizontal, Sparkles, Percent, Info,
+  Pin, Maximize2, Minimize2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { PortalGrafikLabaBulanan } from './PortalGrafikLabaBulanan';
 import { AdminTrenSimpananPinjamanChart } from './AdminTrenSimpananPinjamanChart';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
+import { KalenderSimpananWajib } from './KalenderSimpananWajib';
 
 // ================= COOPERATIVE REAL-TIME DASHBOARD =================
 interface DashboardProps {
@@ -969,6 +975,7 @@ interface LaporanProps {
   onAddSHUDistribution?: (dist: SHUDistribution) => Promise<void> | void;
   onUpdateSetup?: (newSetup: KoperasiSetup) => void;
   onNavigateToAngsuran?: (angsuranId?: string, memberId?: string, query?: string) => void;
+  onNavigateToSimpanan?: (memberId?: string, query?: string) => void;
   onNavigateToPinjaman?: (pinjamanId?: string, memberId?: string, query?: string) => void;
   userRole?: 'admin' | 'pengawas' | 'karyawan_warung' | 'member' | null;
 }
@@ -979,6 +986,7 @@ export function LaporanView({
   onDeleteAngsuran, onDeleteSimpanan, onEditSimpanan, onEditAngsuran,
   onAddExpense, shuDistributions = [], onAddSHUDistribution, onUpdateSetup,
   onNavigateToAngsuran,
+  onNavigateToSimpanan,
   onNavigateToPinjaman,
   userRole
 }: LaporanProps) {
@@ -1057,7 +1065,225 @@ export function LaporanView({
     }
   }, [defaultYear, income, expenses]);
   
-  const [activeReportTab, setActiveReportTab] = useState<'labaRugi' | 'neraca' | 'rekapArusKas' | 'nominatif' | 'simpanan' | 'pinjaman' | 'angsuran' | 'rasioKesehatan' | 'piutangWarung' | 'kreditMacet' | 'pembagianSHU'>('labaRugi');
+  const [activeReportTab, setActiveReportTab] = useState<'labaRugi' | 'neraca' | 'rekapArusKas' | 'nominatif' | 'rekapSimpananWajib' | 'simpanan' | 'pinjaman' | 'angsuran' | 'rasioKesehatan' | 'piutangWarung' | 'kreditMacet' | 'pembagianSHU'>('labaRugi');
+
+  // Rekap Simpanan Wajib Bulan Berjalan States
+  const currentRunningMonthYM = useMemo(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
+  const [rekapWajibMonth, setRekapWajibMonth] = useState<string>(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
+  const [rekapWajibStatusFilter, setRekapWajibStatusFilter] = useState<'semua' | 'belum_bayar' | 'sudah_bayar'>('belum_bayar');
+  const [rekapWajibSearch, setRekapWajibSearch] = useState<string>('');
+  const [calendarModalMember, setCalendarModalMember] = useState<Member | null>(null);
+
+  const rekapWajibData = useMemo(() => {
+    const expNominal = setup?.nominalSimpananWajib || 50000;
+    const targetYM = rekapWajibMonth;
+    const parts = targetYM.split('-');
+    const yr = parseInt(parts[0], 10) || new Date().getFullYear();
+    const mo = parseInt(parts[1], 10) || (new Date().getMonth() + 1);
+
+    const rows = (members || []).map(m => {
+      const status = getMemberWajibMonthStatus(m.id, simpanan, targetYM, expNominal);
+
+      // Check all previous unpaid months in the same year up to target month
+      const priorUnpaid: string[] = [];
+      for (let prevM = 1; prevM < mo; prevM++) {
+        const prevYM = `${yr}-${String(prevM).padStart(2, '0')}`;
+        const prevStatus = getMemberWajibMonthStatus(m.id, simpanan, prevYM, expNominal);
+        if (!prevStatus.isPaid) {
+          priorUnpaid.push(INDO_MONTH_NAMES[prevM - 1]);
+        }
+      }
+
+      return {
+        member: m,
+        isPaid: status.isPaid,
+        totalPaid: status.totalPaid,
+        kekurangan: Math.max(0, expNominal - status.totalPaid),
+        latestPayment: status.latestPayment,
+        paymentDate: status.paymentDate,
+        transactionId: status.transactionId,
+        priorUnpaidMonths: priorUnpaid,
+      };
+    });
+
+    const totalMembers = rows.length;
+    const paidMembers = rows.filter(r => r.isPaid);
+    const unpaidMembers = rows.filter(r => !r.isPaid);
+    const totalCollected = paidMembers.reduce((sum, r) => sum + r.totalPaid, 0);
+    const totalUnpaidNominal = unpaidMembers.reduce((sum, r) => sum + r.kekurangan, 0);
+    const kepatuhanPercent = totalMembers > 0 ? Math.round((paidMembers.length / totalMembers) * 100) : 0;
+
+    return {
+      rows,
+      totalMembers,
+      paidCount: paidMembers.length,
+      unpaidCount: unpaidMembers.length,
+      totalCollected,
+      totalUnpaidNominal,
+      kepatuhanPercent
+    };
+  }, [members, simpanan, rekapWajibMonth, setup?.nominalSimpananWajib]);
+
+  const filteredRekapWajibRows = useMemo(() => {
+    return rekapWajibData.rows.filter(r => {
+      if (rekapWajibStatusFilter === 'belum_bayar' && r.isPaid) return false;
+      if (rekapWajibStatusFilter === 'sudah_bayar' && !r.isPaid) return false;
+
+      if (rekapWajibSearch.trim()) {
+        const q = rekapWajibSearch.toLowerCase().trim();
+        const m = r.member;
+        const matchName = m.nama.toLowerCase().includes(q);
+        const matchNo = m.noAnggota.toLowerCase().includes(q);
+        const matchHp = m.noHp ? m.noHp.includes(q) : false;
+        const matchJob = m.pekerjaan ? m.pekerjaan.toLowerCase().includes(q) : false;
+        if (!matchName && !matchNo && !matchHp && !matchJob) return false;
+      }
+      return true;
+    });
+  }, [rekapWajibData.rows, rekapWajibStatusFilter, rekapWajibSearch]);
+
+  const handleExportRekapWajibExcel = () => {
+    const rows = filteredRekapWajibRows.map((r, idx) => ({
+      No: idx + 1,
+      'No. Anggota': r.member.noAnggota,
+      'Nama Anggota': r.member.nama,
+      'Unit / Pekerjaan': r.member.pekerjaan || '-',
+      'No. Telepon / HP': r.member.noHp || '-',
+      'Periode Bulan': formatYearMonthIndo(rekapWajibMonth),
+      'Status Pembayaran': r.isPaid ? 'LUNAS' : 'BELUM BAYAR',
+      'Nominal Iuran Wajib': setup?.nominalSimpananWajib || 50000,
+      'Jumlah Terbayar': r.totalPaid,
+      'Kekurangan / Tunggakan': r.kekurangan,
+      'Tanggal Pembayaran': r.paymentDate || '-',
+      'ID Transaksi': r.transactionId || '-',
+      'Tunggakan Bulan Lain di Tahun Ini': r.priorUnpaidMonths.length > 0 ? r.priorUnpaidMonths.join(', ') : '-'
+    }));
+
+    exportToExcel(
+      rows,
+      `Rekap Wajib ${rekapWajibMonth}`,
+      `Rekap_Belum_Bayar_Simpanan_Wajib_${rekapWajibMonth}_${Date.now()}.xlsx`,
+      setup
+    );
+  };
+
+  const handlePrintRekapWajib = () => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert("Izin popup diblokir. Harap aktifkan popup di peramban Anda.");
+      return;
+    }
+    const kopName = setup?.namaKoperasi || "Koperasi Dana Segar";
+    const kopAlamat = setup?.alamatKantor || "Kantor Pusat Koperasi";
+    const periodLabel = formatYearMonthIndo(rekapWajibMonth).toUpperCase();
+
+    const dataPrint = filteredRekapWajibRows;
+    const unpaidList = dataPrint.filter(r => !r.isPaid);
+    const paidList = dataPrint.filter(r => r.isPaid);
+    const totalTunggakan = unpaidList.reduce((acc, c) => acc + c.kekurangan, 0);
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>REKAP_BELUM_BAYAR_SIMPANAN_WAJIB_${rekapWajibMonth}</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; font-size: 11px; color: #111; }
+            .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 15px; }
+            .header h2 { margin: 0; font-size: 16px; text-transform: uppercase; }
+            .header p { margin: 2px 0; font-size: 10px; color: #555; }
+            .title { text-align: center; font-weight: bold; margin: 15px 0 10px 0; font-size: 13px; text-decoration: underline; }
+            .summary-box { display: flex; justify-content: space-between; margin-bottom: 15px; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; font-size: 10px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 10px; }
+            th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+            th { background-color: #f2f2f2; font-weight: bold; text-align: center; }
+            .text-right { text-align: right; }
+            .text-center { text-align: center; }
+            .badge-unpaid { color: #b91c1c; font-weight: bold; }
+            .badge-paid { color: #047857; font-weight: bold; }
+            .total-row { background-color: #fee2e2; font-weight: bold; }
+            .signature { margin-top: 35px; display: flex; justify-content: space-between; page-break-inside: avoid; }
+            .sign-box { width: 200px; text-align: center; }
+            .sign-line { margin-top: 55px; border-bottom: 1px solid #000; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h2>${kopName}</h2>
+            <p>${kopAlamat}</p>
+            <p>LAPORAN REKAPITULASI PEMBAYARAN & MONITORING SIMPANAN WAJIB</p>
+          </div>
+          <div class="title">REKAP ANGGOTA BELUM MEMBAYAR SIMPANAN WAJIB BULAN: ${periodLabel}</div>
+          
+          <div class="summary-box">
+            <div>Total Anggota: <b>${dataPrint.length}</b></div>
+            <div>Sudah Lunas: <b style="color: #047857;">${paidList.length} Orang</b></div>
+            <div>Belum Bayar: <b style="color: #b91c1c;">${unpaidList.length} Orang</b></div>
+            <div>Total Tunggakan: <b style="color: #b91c1c;">${formatRupiah(totalTunggakan)}</b></div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th width="30">No</th>
+                <th width="80">No. Anggota</th>
+                <th width="160">Nama Anggota</th>
+                <th width="100">Pekerjaan</th>
+                <th width="90">No. Telepon</th>
+                <th width="85" class="text-center">Status</th>
+                <th width="100" class="text-right">Tunggakan (Rp)</th>
+                <th>Keterangan / Tunggakan Lain</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${dataPrint.map((item, idx) => `
+                <tr style="${!item.isPaid ? 'background-color: #fffaf0;' : ''}">
+                  <td class="text-center">${idx + 1}</td>
+                  <td class="text-center font-bold">${item.member.noAnggota}</td>
+                  <td><b>${item.member.nama}</b></td>
+                  <td>${item.member.pekerjaan || '-'}</td>
+                  <td>${item.member.noHp || '-'}</td>
+                  <td class="text-center ${item.isPaid ? 'badge-paid' : 'badge-unpaid'}">
+                    ${item.isPaid ? 'LUNAS' : 'BELUM BAYAR'}
+                  </td>
+                  <td class="text-right font-mono ${!item.isPaid ? 'badge-unpaid' : ''}">
+                    ${item.isPaid ? '-' : formatRupiah(item.kekurangan)}
+                  </td>
+                  <td>${item.priorUnpaidMonths.length > 0 ? `Tunggakan lalu: ${item.priorUnpaidMonths.join(', ')}` : (item.isPaid ? `Lunas tgl: ${item.paymentDate || '-'}` : 'Iuran bulan berjalan belum diterima')}</td>
+                </tr>
+              `).join('')}
+              <tr class="total-row">
+                <td colspan="6" class="text-right"><b>TOTAL ESTIMASI TUNGGAKAN:</b></td>
+                <td class="text-right"><b>${formatRupiah(totalTunggakan)}</b></td>
+                <td></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="signature">
+            <div class="sign-box">
+              <p>Mengetahui,<br/>Ketua Koperasi</p>
+              <div class="sign-line"></div>
+            </div>
+            <div class="sign-box">
+              <p>Dicetak Pada: ${new Date().toLocaleDateString('id-ID')}<br/>Bendahara Koperasi</p>
+              <div class="sign-line"></div>
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+    }, 400);
+  };
 
   // Rekap Arus Kas (Cash Flow) States
   const [cashFlowSortBy, setCashFlowSortBy] = useState<'month' | 'inflow' | 'outflow' | 'net'>('month');
@@ -1300,18 +1526,36 @@ export function LaporanView({
     const revenueBreakdown = calculateCooperativeRevenue(income, pinjaman, angsuran);
     const totalRevenue = revenueBreakdown.totalRevenue;
 
+    const isSHUExpense = (e: BebanKoperasi) => {
+      const cat = (e.kategori || '').toLowerCase();
+      const ket = (e.keterangan || '').toLowerCase();
+      return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+    };
+    const shuExpenses = expenses.filter(e => isSHUExpense(e));
+    const totalSHUDisbursed = shuExpenses.reduce((sum, e) => sum + e.nominal, 0);
+
     const bGajiKaryawan = expenses.filter(e => e.kategori === 'gaji_karyawan').reduce((a, c) => a + c.nominal, 0);
-    const bListrik = expenses.filter(e => e.kategori === 'listrik').reduce((a, c) => a + c.nominal, 0);
-    const bGajiPengurus = expenses.filter(e => e.kategori === 'gaji_pengurus').reduce((a, c) => a + c.nominal, 0);
-    const bGajiPengawas = expenses.filter(e => e.kategori === 'gaji_pengawas').reduce((a, c) => a + c.nominal, 0);
-    const bOperasional = expenses.filter(e => e.kategori === 'operasional_kantor').reduce((a, c) => a + c.nominal, 0);
-    const bRapat = expenses.filter(e => e.kategori === 'beban_rapat').reduce((a, c) => a + c.nominal, 0);
-    const bLain = expenses.filter(e => !['gaji_karyawan', 'listrik', 'gaji_pengurus', 'gaji_pengawas', 'operasional_kantor', 'beban_rapat', 'penyusutan_inventaris', 'penyusutan_aktiva_tetap'].includes(e.kategori) && !e.kategori?.toLowerCase().includes('penyusutan')).reduce((a, c) => a + c.nominal, 0);
+    const bListrik = expenses.filter(e => e.kategori === 'listrik' || e.kategori === 'listrik_air').reduce((a, c) => a + c.nominal, 0);
+    const bGajiPengurus = expenses.filter(e => e.kategori === 'gaji_pengurus' && !isSHUExpense(e)).reduce((a, c) => a + c.nominal, 0);
+    const bGajiPengawas = expenses.filter(e => e.kategori === 'gaji_pengawas' && !isSHUExpense(e)).reduce((a, c) => a + c.nominal, 0);
+    const bOperasional = expenses.filter(e => e.kategori === 'operasional_kantor' || e.kategori === 'atk').reduce((a, c) => a + c.nominal, 0);
+    const bRapat = expenses.filter(e => e.kategori === 'beban_rapat' || e.kategori === 'rapat').reduce((a, c) => a + c.nominal, 0);
+    const bLain = expenses.filter(e => !['gaji_karyawan', 'listrik', 'listrik_air', 'gaji_pengurus', 'gaji_pengawas', 'operasional_kantor', 'atk', 'beban_rapat', 'rapat', 'penyusutan_inventaris', 'penyusutan_aktiva_tetap'].includes(e.kategori) && !e.kategori?.toLowerCase().includes('penyusutan') && !isSHUExpense(e)).reduce((a, c) => a + c.nominal, 0);
     const totalExpenses = bGajiKaryawan + bListrik + bGajiPengurus + bGajiPengawas + bOperasional + bRapat + bPenyusutan + bLain;
     const netProfit = totalRevenue - totalExpenses;
 
-    const danaCadangan = Math.round(netProfit * 0.20);
-    const shuBerjalan = netProfit - danaCadangan;
+    const totalDanaCadanganFromDist = (shuDistributions || []).reduce((sum, d) => sum + (d.danaCadanganNominal || 0), 0);
+    let danaCadangan = danaCadanganAwal;
+    let alokasiCadangan = 0;
+    if (totalDanaCadanganFromDist > 0) {
+      alokasiCadangan = totalDanaCadanganFromDist;
+      danaCadangan += totalDanaCadanganFromDist;
+    } else if (netProfit > 0) {
+      alokasiCadangan = Math.round(netProfit * 0.20);
+      danaCadangan += alokasiCadangan;
+    }
+
+    const shuBerjalan = netProfit - alokasiCadangan - totalSHUDisbursed;
 
     const aktivaItems = [
       { key: 'kas', nama: 'Kas & Bank', awal: kasAwal, akhir: kasAkhir, val: initKas, setVal: setInitKas },
@@ -1370,7 +1614,7 @@ export function LaporanView({
       piutangDelta: piutangBeredar - piutangAwal,
       simpananGrowth: (sPokok + sWajib + sSukarela),
     };
-  }, [simpanan, pinjaman, angsuran, income, expenses, pembelian, piutangWarung, setup, initKas, initPiutang, initPiutangWarung, initWarung, initSeragam, initBarang, initInventaris, initAtribut, initSimpSukarela, initSimpPokok, initSimpWajib, initModal, initDanaCadangan, initShu]);
+  }, [simpanan, pinjaman, angsuran, income, expenses, pembelian, piutangWarung, setup, initKas, initPiutang, initPiutangWarung, initWarung, initSeragam, initBarang, initInventaris, initAtribut, initSimpSukarela, initSimpPokok, initSimpWajib, initModal, initDanaCadangan, initShu, shuDistributions]);
 
   // SHU Distribution States
   const [persenDanaCadangan, setPersenDanaCadangan] = useState<number>(25);
@@ -1382,10 +1626,14 @@ export function LaporanView({
 
   // SHU Per Anggota States (Aturan Baku Perkoperasian JMA & JUA)
   const [shuSubTab, setShuSubTab] = useState<'perAnggota' | 'alokasiKoperasi'>('perAnggota');
-  const [persenJasaModal, setPersenJasaModal] = useState<number>(50); // Default 50% JMA (Simpanan)
-  const [includeSukarelaInJMA, setIncludeSukarelaInJMA] = useState<boolean>(true); // Default true
+  const [persenJasaModal, setPersenJasaModal] = useState<number>(setup?.shuPersenJMA ?? 50); // Default 50% JMA (Simpanan)
+  const [includeSukarelaInJMA, setIncludeSukarelaInJMA] = useState<boolean>(setup?.shuIncludeSukarelaInJMA ?? true); // Default true
+  const [includeJasaPinjamanInJUA, setIncludeJasaPinjamanInJUA] = useState<boolean>(setup?.shuIncludeJasaPinjamanInJUA ?? true); // Default true (Jasa Pinjaman SP)
+  const [includeWarungInJUA, setIncludeWarungInJUA] = useState<boolean>(setup?.shuIncludeWarungInJUA ?? false); // Default false (Sesuai instruksi: Warung tidak dimasukkan ke JUA)
+  const [includeSukarelaInJUA, setIncludeSukarelaInJUA] = useState<boolean>(setup?.shuIncludeSukarelaInJUA ?? false); // Default false (Simpanan Sukarela dalam JUA)
+  const [includeProvisiInJUA, setIncludeProvisiInJUA] = useState<boolean>(setup?.shuIncludeProvisiInJUA ?? false); // Default false (Provisi Akad)
   const [shuAnggotaSearch, setShuAnggotaSearch] = useState<string>('');
-  const [shuAnggotaSortBy, setShuAnggotaSortBy] = useState<'total' | 'jma' | 'jua' | 'nama' | 'noAnggota' | 'simpanan' | 'usaha'>('total');
+  const [shuAnggotaSortBy, setShuAnggotaSortBy] = useState<'total' | 'pembulatan' | 'jma' | 'jua' | 'nama' | 'noAnggota' | 'simpanan' | 'usaha'>('pembulatan');
   const [shuAnggotaSortOrder, setShuAnggotaSortOrder] = useState<'asc' | 'desc'>('desc');
   const [selectedSHUReference, setSelectedSHUReference] = useState<string>('live');
   const [activeSlipMember, setActiveSlipMember] = useState<{
@@ -1398,11 +1646,71 @@ export function LaporanView({
     shuJMA: number;
     jasaPinjamanDibayar: number;
     belanjaWarung: number;
+    provisiDibayar?: number;
     totalPartisipasiUsaha: number;
     porsiUsahaPct: number;
     shuJUA: number;
     totalSHU: number;
+    shuPembulatan500: number;
+    includeJasaPinjamanInJUA?: boolean;
+    includeWarungInJUA?: boolean;
+    includeSukarelaInJUA?: boolean;
+    includeProvisiInJUA?: boolean;
   } | null>(null);
+
+  // Sync state from KoperasiSetup
+  useEffect(() => {
+    if (setup) {
+      if (setup.shuPersenJMA !== undefined) setPersenJasaModal(setup.shuPersenJMA);
+      if (setup.shuIncludeSukarelaInJMA !== undefined) setIncludeSukarelaInJMA(setup.shuIncludeSukarelaInJMA);
+      if (setup.shuIncludeJasaPinjamanInJUA !== undefined) setIncludeJasaPinjamanInJUA(setup.shuIncludeJasaPinjamanInJUA);
+      if (setup.shuIncludeWarungInJUA !== undefined) setIncludeWarungInJUA(setup.shuIncludeWarungInJUA);
+      if (setup.shuIncludeSukarelaInJUA !== undefined) setIncludeSukarelaInJUA(setup.shuIncludeSukarelaInJUA);
+      if (setup.shuIncludeProvisiInJUA !== undefined) setIncludeProvisiInJUA(setup.shuIncludeProvisiInJUA);
+    }
+  }, [setup]);
+
+  const handleSetPersenJasaModal = (val: number) => {
+    setPersenJasaModal(val);
+    if (onUpdateSetup && setup) {
+      onUpdateSetup({ ...setup, shuPersenJMA: val });
+    }
+  };
+
+  const handleToggleIncludeSukarelaInJMA = (val: boolean) => {
+    setIncludeSukarelaInJMA(val);
+    if (onUpdateSetup && setup) {
+      onUpdateSetup({ ...setup, shuIncludeSukarelaInJMA: val });
+    }
+  };
+
+  const handleToggleIncludeJasaPinjamanInJUA = (val: boolean) => {
+    setIncludeJasaPinjamanInJUA(val);
+    if (onUpdateSetup && setup) {
+      onUpdateSetup({ ...setup, shuIncludeJasaPinjamanInJUA: val });
+    }
+  };
+
+  const handleToggleIncludeWarungInJUA = (val: boolean) => {
+    setIncludeWarungInJUA(val);
+    if (onUpdateSetup && setup) {
+      onUpdateSetup({ ...setup, shuIncludeWarungInJUA: val });
+    }
+  };
+
+  const handleToggleIncludeSukarelaInJUA = (val: boolean) => {
+    setIncludeSukarelaInJUA(val);
+    if (onUpdateSetup && setup) {
+      onUpdateSetup({ ...setup, shuIncludeSukarelaInJUA: val });
+    }
+  };
+
+  const handleToggleIncludeProvisiInJUA = (val: boolean) => {
+    setIncludeProvisiInJUA(val);
+    if (onUpdateSetup && setup) {
+      onUpdateSetup({ ...setup, shuIncludeProvisiInJUA: val });
+    }
+  };
   
   // States for Piutang Warung report filtering
   const [piutangWarungSearch, setPiutangWarungSearch] = useState('');
@@ -1494,6 +1802,7 @@ export function LaporanView({
   };
 
   const [nominatifSearch, setNominatifSearch] = useState('');
+  const [isNominatifFullHeight, setIsNominatifFullHeight] = useState<boolean>(false);
   const [selectedMemberForMutasi, setSelectedMemberForMutasi] = useState<string | null>(null);
 
   // New states for individual report filtering
@@ -2032,14 +2341,39 @@ export function LaporanView({
 
     const totalSimpanan = sPokok + sWajib + sSukarela;
 
+    // Separate regular operational expenses from Kas Keluar SHU
+    const isSHUExpense = (e: BebanKoperasi) => {
+      const cat = (e.kategori || '').toLowerCase();
+      const ket = (e.keterangan || '').toLowerCase();
+      return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+    };
+
+    const regularExpenses = expenses.filter(e => !isSHUExpense(e));
+    const shuExpenses = expenses.filter(e => isSHUExpense(e));
+    const totalSHUDisbursed = shuExpenses.reduce((sum, e) => sum + e.nominal, 0);
+
+    const totalOperationalExp = regularExpenses.reduce((a, c) => a + c.nominal, 0);
+
     // SHU Lancar All Time using unified revenue calculation
     const revenueAll = calculateCooperativeRevenue(income, pinjaman, angsuran);
-    const shuBersihAll = revenueAll.totalRevenue - totalExpAll;
+    const shuBersihAll = revenueAll.totalRevenue - totalOperationalExp;
 
-    // Split SHU into Dana Cadangan (20%) and SHU Berjalan (80%) for cooperative balance accounting
-    const shuAwal = setup?.shuAwal ?? 0;
-    const danaCadangan = Math.round(shuBersihAll * 0.20);
-    const shuBerjalan = shuBersihAll - danaCadangan;
+    // Dana Cadangan pada Neraca Saldo menyesuaikan nominal pada distribusi SHU yang ada
+    const totalDanaCadanganFromDist = (shuDistributions || []).reduce((sum, d) => sum + (d.danaCadanganNominal || 0), 0);
+
+    let danaCadangan = danaCadanganAwal;
+    let alokasiCadanganBerjalan = 0;
+    if (totalDanaCadanganFromDist > 0) {
+      alokasiCadanganBerjalan = totalDanaCadanganFromDist;
+      danaCadangan += totalDanaCadanganFromDist;
+    } else if (shuBersihAll > 0) {
+      alokasiCadanganBerjalan = Math.round(shuBersihAll * 0.20);
+      danaCadangan += alokasiCadanganBerjalan;
+    }
+
+    // Sisa SHU Berjalan pada Neraca Saldo:
+    // Berkurang sesuai kas keluar SHU dan alokasi dana cadangan
+    const shuBerjalan = shuBersihAll - alokasiCadanganBerjalan - totalSHUDisbursed;
 
     const customRekeningPasivaList = (rekening || []).filter(r => r.kategori === 'Pasiva');
     const totalCustomRekeningPasiva = customRekeningPasivaList.reduce((sum, r) => sum + r.saldo, 0);
@@ -2069,9 +2403,11 @@ export function LaporanView({
       danaCadangan,
       shuBerjalan,
       shuBersihAll,
+      totalSHUDisbursed,
+      alokasiCadanganBerjalan,
       totalPasiva
     };
-  }, [simpanan, pinjaman, angsuran, income, expenses, pembelian, piutangWarung, setup, rekening]);
+  }, [simpanan, pinjaman, angsuran, income, expenses, pembelian, piutangWarung, setup, rekening, shuDistributions]);
 
   // Menghitung Rasio Likuiditas, Solvabilitas, dan Rentabilitas Koperasi secara real-time untuk LaporanView
   const cooperativeRatios = useMemo(() => {
@@ -2152,25 +2488,25 @@ export function LaporanView({
       if (shuAnggotaNominal > 0) {
         await onAddExpense({
           tanggal: today,
-          kategori: 'beban_lain',
+          kategori: 'pencairan_shu',
           nominal: shuAnggotaNominal,
-          keterangan: `Pembagian SHU Bagian Anggota (${persenAnggota}%)`
+          keterangan: `Pembagian SHU Bagian Anggota (${persenAnggota}%) - Tahun Buku ${activeTahunBuku}`
         });
       }
       if (shuPengurusNominal > 0) {
         await onAddExpense({
           tanggal: today,
-          kategori: 'gaji_pengurus',
+          kategori: 'pencairan_shu',
           nominal: shuPengurusNominal,
-          keterangan: `Pembagian SHU Bagian Pengurus (${persenPengurus}%)`
+          keterangan: `Pembagian SHU Bagian Pengurus (${persenPengurus}%) - Tahun Buku ${activeTahunBuku}`
         });
       }
       if (shuPengawasNominal > 0) {
         await onAddExpense({
           tanggal: today,
-          kategori: 'gaji_pengawas',
+          kategori: 'pencairan_shu',
           nominal: shuPengawasNominal,
-          keterangan: `Pembagian SHU Bagian Pengawas (${persenPengawas}%)`
+          keterangan: `Pembagian SHU Bagian Pengawas (${persenPengawas}%) - Tahun Buku ${activeTahunBuku}`
         });
       }
     }
@@ -2231,7 +2567,19 @@ export function LaporanView({
         }
       });
 
-      const totalPartisipasiUsaha = jasaPinjamanDibayar + belanjaWarung;
+      // c. Provisi Akad Kredit (biaya administrasi provisi)
+      const provisiDibayar = pinjaman.filter(p => p.anggotaId === m.id).reduce((a, c) => a + (c.provisiDipotong || 0), 0);
+
+      // Hitung total partisipasi usaha anggota hanya dari sumber pendapatan yang dicentang di KoperasiSetup:
+      // - Unit Jasa: includeJasaPinjamanInJUA
+      // - Unit Warung: includeWarungInJUA
+      // - Simpanan Sukarela: includeSukarelaInJUA
+      // - Unit Provisi: includeProvisiInJUA
+      const totalPartisipasiUsaha = 
+        (includeJasaPinjamanInJUA ? jasaPinjamanDibayar : 0) + 
+        (includeWarungInJUA ? belanjaWarung : 0) +
+        (includeSukarelaInJUA ? sSukarela : 0) +
+        (includeProvisiInJUA ? provisiDibayar : 0);
 
       return {
         member: m,
@@ -2242,6 +2590,7 @@ export function LaporanView({
         totalSemuaSimpanan,
         jasaPinjamanDibayar,
         belanjaWarung,
+        provisiDibayar,
         totalPartisipasiUsaha
       };
     });
@@ -2251,7 +2600,7 @@ export function LaporanView({
     const totalPartisipasiUsahaAll = memberItems.reduce((acc, item) => acc + item.totalPartisipasiUsaha, 0);
 
     // 3. Kalkulasi Pembagian JMA dan JUA untuk setiap anggota
-    const calculatedMembers = memberItems.map(item => {
+    const rawCalculatedMembers = memberItems.map(item => {
       const porsiSimpananPct = totalSimpananEligibleAll > 0
         ? (item.totalSimpananEligible / totalSimpananEligibleAll) * 100
         : 0;
@@ -2278,8 +2627,79 @@ export function LaporanView({
       };
     });
 
+    // 4. Pembulatan 500 Rupiah Tanpa Pecahan Satuan / Puluhan (Kelipatan Rp 500)
+    // Serta penyeimbangan (Largest Remainder / Hare-Niemeyer balancing) agar total akumulasi tepat sama dengan jumlah SHU yang dibayarkan
+    const totalRawSHU = rawCalculatedMembers.reduce((acc, m) => acc + m.totalSHU, 0);
+    // Target jumlah SHU yang dibayarkan: dibulatkan ke kelipatan 500 terdekat dari pool SHU anggota (atau total SHU murni jika pool = 0)
+    const targetSHUPaid = totalRawSHU > 0 
+      ? Math.round((shuAnggotaPool > 0 ? shuAnggotaPool : totalRawSHU) / 500) * 500
+      : 0;
+
+    // Hitung pembulatan awal kelipatan 500 untuk tiap anggota
+    const membersWithInitialRounding = rawCalculatedMembers.map((m, originalIdx) => {
+      const initial500 = m.totalSHU > 0 ? Math.round(m.totalSHU / 500) * 500 : 0;
+      const residual = m.totalSHU - initial500;
+      return {
+        ...m,
+        originalIdx,
+        shuPembulatan500: initial500,
+        residual
+      };
+    });
+
+    const sumInitialRounded = membersWithInitialRounding.reduce((acc, m) => acc + m.shuPembulatan500, 0);
+    let diff500 = targetSHUPaid - sumInitialRounded;
+
+    // diff500 dijamin kelipatan 500 karena targetSHUPaid dan sumInitialRounded sama-sama kelipatan 500
+    if (diff500 !== 0 && membersWithInitialRounding.length > 0) {
+      if (diff500 > 0) {
+        // Kurang: Berikan tambahan +Rp 500 kepada anggota yang memiliki residual positif terbesar
+        const sortedByResidualDesc = [...membersWithInitialRounding]
+          .filter(m => m.totalSHU > 0)
+          .sort((a, b) => b.residual - a.residual);
+
+        let steps = Math.round(diff500 / 500);
+        let pointer = 0;
+        while (steps > 0 && pointer < sortedByResidualDesc.length) {
+          const targetMember = sortedByResidualDesc[pointer];
+          const originalMember = membersWithInitialRounding.find(m => m.originalIdx === targetMember.originalIdx);
+          if (originalMember) {
+            originalMember.shuPembulatan500 += 500;
+            steps--;
+          }
+          pointer++;
+          if (pointer >= sortedByResidualDesc.length && steps > 0) {
+            pointer = 0;
+          }
+        }
+      } else {
+        // Lebih: Kurangi -Rp 500 dari anggota yang memiliki residual paling negatif, minimal Rp 0
+        const sortedByResidualAsc = [...membersWithInitialRounding]
+          .filter(m => m.shuPembulatan500 >= 500)
+          .sort((a, b) => a.residual - b.residual);
+
+        let steps = Math.round(Math.abs(diff500) / 500);
+        let pointer = 0;
+        while (steps > 0 && pointer < sortedByResidualAsc.length) {
+          const targetMember = sortedByResidualAsc[pointer];
+          const originalMember = membersWithInitialRounding.find(m => m.originalIdx === targetMember.originalIdx);
+          if (originalMember && originalMember.shuPembulatan500 >= 500) {
+            originalMember.shuPembulatan500 -= 500;
+            steps--;
+          }
+          pointer++;
+          if (pointer >= sortedByResidualAsc.length && steps > 0) {
+            break;
+          }
+        }
+      }
+    }
+
+    const calculatedMembers = membersWithInitialRounding.map(({ originalIdx, residual, ...rest }) => rest);
+
     // Statistik Ringkasan
     const totalSHUDistributed = calculatedMembers.reduce((acc, m) => acc + m.totalSHU, 0);
+    const totalSHUPembulatan500Distributed = calculatedMembers.reduce((acc, m) => acc + m.shuPembulatan500, 0);
     const totalJMADistributed = calculatedMembers.reduce((acc, m) => acc + m.shuJMA, 0);
     const totalJUADistributed = calculatedMembers.reduce((acc, m) => acc + m.shuJUA, 0);
     const avgSHU = calculatedMembers.length > 0 ? Math.round(totalSHUDistributed / calculatedMembers.length) : 0;
@@ -2296,13 +2716,14 @@ export function LaporanView({
       totalPartisipasiUsahaAll,
       calculatedMembers,
       totalSHUDistributed,
+      totalSHUPembulatan500Distributed,
       totalJMADistributed,
       totalJUADistributed,
       avgSHU,
       maxSHU,
       minSHU
     };
-  }, [members, simpanan, angsuran, income, piutangWarung, liveSHUBersih, filterStartDate, persenAnggota, persenJasaModal, includeSukarelaInJMA, selectedSHUReference, shuDistributions]);
+  }, [members, simpanan, pinjaman, angsuran, income, piutangWarung, liveSHUBersih, filterStartDate, persenAnggota, persenJasaModal, includeSukarelaInJMA, includeJasaPinjamanInJUA, includeWarungInJUA, includeSukarelaInJUA, includeProvisiInJUA, selectedSHUReference, shuDistributions]);
 
   const filteredSHUMembers = useMemo(() => {
     let list = [...shuPerAnggotaCalculations.calculatedMembers];
@@ -2315,7 +2736,8 @@ export function LaporanView({
     }
     list.sort((a, b) => {
       let diff = 0;
-      if (shuAnggotaSortBy === 'total') diff = a.totalSHU - b.totalSHU;
+      if (shuAnggotaSortBy === 'pembulatan') diff = a.shuPembulatan500 - b.shuPembulatan500;
+      else if (shuAnggotaSortBy === 'total') diff = a.totalSHU - b.totalSHU;
       else if (shuAnggotaSortBy === 'jma') diff = a.shuJMA - b.shuJMA;
       else if (shuAnggotaSortBy === 'jua') diff = a.shuJUA - b.shuJUA;
       else if (shuAnggotaSortBy === 'simpanan') diff = a.totalSimpananEligible - b.totalSimpananEligible;
@@ -2341,16 +2763,23 @@ export function LaporanView({
       "SHU Jasa Modal / JMA (Rp)": item.shuJMA,
       "Jasa Pinjaman Disetor (Rp)": item.jasaPinjamanDibayar,
       "Belanja Warung (Rp)": item.belanjaWarung,
+      "Provisi Pinjaman (Rp)": item.provisiDibayar || 0,
+      "Status Jasa SP di JUA": includeJasaPinjamanInJUA ? "Dihitung" : "Dikecualikan",
+      "Status Warung di JUA": includeWarungInJUA ? "Dihitung" : "Dikecualikan (Hanya SP)",
+      "Status Sukarela di JUA": includeSukarelaInJUA ? "Dihitung" : "Dikecualikan",
+      "Status Provisi di JUA": includeProvisiInJUA ? "Dihitung" : "Dikecualikan",
       "Total Partisipasi Usaha (Rp)": item.totalPartisipasiUsaha,
       "Porsi Usaha (%)": item.porsiUsahaPct.toFixed(2) + "%",
       "SHU Jasa Usaha / JUA (Rp)": item.shuJUA,
-      "TOTAL SHU DITERIMA (Rp)": item.totalSHU,
+      "TOTAL SHU MURNI (Rp)": item.totalSHU,
+      "SHU DIBAYARKAN / PEMBULATAN 500 (Rp)": item.shuPembulatan500,
+      "Selisih Pembulatan (Rp)": item.shuPembulatan500 - item.totalSHU,
     }));
     exportToExcel(data, "SHU Per Anggota", `Laporan_Pembagian_SHU_Per_Anggota_${new Date().getFullYear()}`, setup);
   };
 
   const handleExportSHUAnggotaPDF = () => {
-    const cols = ["NO", "NO ANGGOTA", "NAMA", "SIMPANAN MODAL", "JASA MODAL (JMA)", "PARTISIPASI USAHA", "JASA USAHA (JUA)", "TOTAL SHU"];
+    const cols = ["NO", "NO ANGGOTA", "NAMA", "SIMPANAN MODAL", "JASA MODAL (JMA)", "PARTISIPASI USAHA", "JASA USAHA (JUA)", "TOTAL SHU MURNI", "PEMBULATAN 500 (DIBAYARKAN)"];
     const rows = shuPerAnggotaCalculations.calculatedMembers.map((item, idx) => [
       String(idx + 1),
       item.member.noAnggota,
@@ -2359,8 +2788,16 @@ export function LaporanView({
       formatRupiah(item.shuJMA),
       formatRupiah(item.totalPartisipasiUsaha),
       formatRupiah(item.shuJUA),
-      formatRupiah(item.totalSHU)
+      formatRupiah(item.totalSHU),
+      formatRupiah(item.shuPembulatan500)
     ]);
+
+    const activeSources = [
+      includeJasaPinjamanInJUA && "Unit Jasa SP (Bunga)",
+      includeWarungInJUA && "Unit Warung (Toko)",
+      includeSukarelaInJUA && "Simpanan Sukarela",
+      includeProvisiInJUA && "Unit Provisi"
+    ].filter(Boolean);
 
     const summaryNotes = [
       { label: "Total SHU Bersih Koperasi (Neraca Saldo)", value: formatRupiah(shuPerAnggotaCalculations.totalSHUBersihBase) },
@@ -2369,8 +2806,10 @@ export function LaporanView({
       { label: `Alokasi Pool Jasa Usaha / JUA (${persenJasaUsaha}%)`, value: formatRupiah(shuPerAnggotaCalculations.poolJUA) },
       { label: "Total Simpanan Modal Seluruh Anggota", value: formatRupiah(shuPerAnggotaCalculations.totalSimpananEligibleAll) },
       { label: "Total Partisipasi Usaha Seluruh Anggota", value: formatRupiah(shuPerAnggotaCalculations.totalPartisipasiUsahaAll) },
+      { label: "Sumber Pendapatan Komponen JUA", value: activeSources.length > 0 ? activeSources.join(" + ") : "Tidak ada instrumen dipilih" },
       { label: "Total Anggota Penerima", value: `${shuPerAnggotaCalculations.calculatedMembers.length} Anggota` },
-      { label: "Total Realisasi SHU Dibagikan", value: formatRupiah(shuPerAnggotaCalculations.totalSHUDistributed) }
+      { label: "Total SHU Murni", value: formatRupiah(shuPerAnggotaCalculations.totalSHUDistributed) },
+      { label: "Total Realisasi SHU Dibayarkan (Bulat 500)", value: formatRupiah(shuPerAnggotaCalculations.totalSHUPembulatan500Distributed) }
     ];
 
     exportToPDF(
@@ -3354,7 +3793,7 @@ export function LaporanView({
       </div>
 
       {/* Report Switcher Tabs */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 xl:grid-cols-8 border-b border-slate-150 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 p-1.5 rounded-2xl w-full gap-1.5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-9 border-b border-slate-150 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 p-1.5 rounded-2xl w-full gap-1.5">
         <button
           onClick={() => setActiveReportTab('labaRugi')}
           className={`flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-xl transition-all duration-150 cursor-pointer ${
@@ -3384,6 +3823,22 @@ export function LaporanView({
           }`}
         >
           <ArrowUpDown className="w-4 h-4 text-teal-600"/> Rekap Arus Kas
+        </button>
+        <button
+          onClick={() => setActiveReportTab('rekapSimpananWajib')}
+          className={`flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-xl transition-all duration-150 cursor-pointer ${
+            activeReportTab === 'rekapSimpananWajib'
+              ? 'bg-amber-600 text-white shadow-sm border border-amber-700'
+              : 'text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30'
+          }`}
+        >
+          <AlertCircle className="w-4 h-4 text-amber-500"/>
+          <span>Rekap Wajib Belum Bayar</span>
+          {rekapWajibData.unpaidCount > 0 && (
+            <span className="bg-rose-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full shrink-0">
+              {rekapWajibData.unpaidCount}
+            </span>
+          )}
         </button>
         <button
           onClick={() => setActiveReportTab('nominatif')}
@@ -4860,12 +5315,18 @@ export function LaporanView({
                         <p className="font-bold font-mono text-sm text-emerald-700 dark:text-emerald-400">{formatRupiah(balanceSheet.shuBersihAll)}</p>
                       </div>
                       <div className="flex justify-between text-[10px] text-slate-600 dark:text-slate-400 pl-2 border-t border-teal-100 dark:border-teal-900/50 pt-1">
-                        <span>• Dana Cadangan Koperasi (20%):</span>
+                        <span>• Dana Cadangan Koperasi:</span>
                         <span className="font-mono font-medium text-slate-800 dark:text-slate-200">{formatRupiah(balanceSheet.danaCadangan)}</span>
                       </div>
-                      <div className="flex justify-between text-[10px] text-slate-600 dark:text-slate-400 pl-2">
-                        <span>• Hak SHU Anggota (80%):</span>
-                        <span className="font-mono font-medium text-slate-800 dark:text-slate-200">{formatRupiah(balanceSheet.shuBerjalan)}</span>
+                      {balanceSheet.totalSHUDisbursed > 0 && (
+                        <div className="flex justify-between text-[10px] text-rose-600 dark:text-rose-400 pl-2">
+                          <span>• Kas Keluar SHU (Dicairkan):</span>
+                          <span className="font-mono font-medium">- {formatRupiah(balanceSheet.totalSHUDisbursed)}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between text-[10px] text-slate-600 dark:text-slate-400 pl-2 font-bold">
+                        <span>• Sisa Saldo SHU Berjalan:</span>
+                        <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah(balanceSheet.shuBerjalan)}</span>
                       </div>
                     </div>
 
@@ -5160,7 +5621,7 @@ export function LaporanView({
                       </span>
                     </div>
                     <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-0.5">
-                      Alokasi Bagian Anggota ({persenAnggota}%) sebesar <strong className="font-mono">{formatRupiah(Math.round((balanceSheet.shuBersihAll * persenAnggota) / 100))}</strong> dapat dibagikan ke seluruh anggota berdasarkan Jasa Modal (JMA) dan Jasa Usaha (JUA).
+                      Alokasi Bagian Anggota ({persenAnggota}%) sebesar <strong className="font-mono">{formatRupiah(Math.round((balanceSheet.shuBersihAll * persenAnggota) / 100))}</strong> dapat dibagikan ke seluruh anggota berdasarkan Jasa Modal (JMA) dan Jasa Usaha (JUA).{balanceSheet.totalSHUDisbursed > 0 ? ` Total Kas Keluar SHU dicairkan: ${formatRupiah(balanceSheet.totalSHUDisbursed)} (mengurangi Kas & SHU Neraca).` : ''}
                     </p>
                   </div>
                 </div>
@@ -5285,10 +5746,35 @@ export function LaporanView({
               <div>
                 <h3 className="text-base font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
                   <FileSpreadsheet className="w-5 h-5 text-emerald-600"/> Data Nominatif
+                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
+                    <Pin className="w-2.5 h-2.5 text-emerald-600 dark:text-emerald-400" /> Header Beku (Freeze)
+                  </span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-1">Daftar saldo simpanan pokok, wajib, sukarela, beserta sisa pinjaman per anggota secara terperinci.</p>
               </div>
               <div className="flex items-center gap-2">
+                <button 
+                  type="button"
+                  onClick={() => setIsNominatifFullHeight(prev => !prev)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer border ${
+                    !isNominatifFullHeight 
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800' 
+                      : 'bg-slate-150 dark:bg-slate-700 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-650'
+                  }`}
+                  title={isNominatifFullHeight ? "Aktifkan Freeze Scroll (Header Tetap Muncul)" : "Tampilkan Tinggi Penuh"}
+                >
+                  {!isNominatifFullHeight ? (
+                    <>
+                      <Pin className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      <span>Freeze Header</span>
+                    </>
+                  ) : (
+                    <>
+                      <Maximize2 className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Tinggi Penuh</span>
+                    </>
+                  )}
+                </button>
                 <button 
                   onClick={handleExportNominatifExcel}
                   className="px-3 py-1.5 bg-slate-150 dark:bg-slate-700 hover:bg-emerald-50 hover:text-emerald-700 dark:hover:bg-emerald-900/30 dark:hover:text-emerald-300 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer border border-slate-200 dark:border-slate-600"
@@ -5318,42 +5804,52 @@ export function LaporanView({
                   onChange={(e) => setNominatifSearch(e.target.value)}
                 />
               </div>
-              <div className="text-[11px] text-emerald-700 dark:text-emerald-400 bg-emerald-50/80 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-900/40 px-3 py-1.5 rounded-lg flex items-center gap-1.5 shrink-0">
-                <Receipt className="w-3.5 h-3.5 text-emerald-600"/>
-                <span>Klik anggota / tombol <b>Mutasi</b> untuk menuju ke <b>Data Mutasi Angsuran</b> di Menu Buku Kas & Mutasi</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10.5px] font-bold px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1.5 shadow-2xs shrink-0 select-none">
+                  <Pin className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                  <span>Header Tetap Muncul Saat Scroll (Freeze)</span>
+                </span>
+                <div className="text-[11px] text-emerald-700 dark:text-emerald-400 bg-emerald-50/80 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-900/40 px-3 py-1.5 rounded-lg flex items-center gap-1.5 shrink-0">
+                  <Receipt className="w-3.5 h-3.5 text-emerald-600"/>
+                  <span>Klik anggota / tombol <b>Mutasi</b> untuk menuju ke <b>Data Mutasi Angsuran</b></span>
+                </div>
               </div>
             </div>
 
-            {/* Responsive Table Container */}
-            <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-700">
-              <table className="w-full table-auto text-left text-xs text-slate-650 dark:text-slate-300">
-                <thead className="bg-slate-50 dark:bg-slate-900 text-slate-500 font-bold uppercase border-b border-slate-100 dark:border-slate-700 text-[10px]">
+            {/* Responsive Table Container with Frozen (Sticky) Header & Footer */}
+            <div className={`rounded-xl border border-slate-250 dark:border-slate-700 shadow-2xs relative bg-white dark:bg-slate-800 ${
+              isNominatifFullHeight 
+                ? 'overflow-x-auto' 
+                : 'overflow-auto max-h-[68vh] xl:max-h-[calc(100vh-270px)]'
+            }`}>
+              <table className="w-full min-w-[1100px] border-separate border-spacing-0 text-left text-xs text-slate-650 dark:text-slate-300">
+                <thead className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 font-bold uppercase text-[10px] shadow-sm">
                   <tr>
-                    <th className="px-3.5 py-3 text-center w-10">No</th>
-                    <th className="px-3 py-3">No. Anggota</th>
-                    <th className="px-3.5 py-3 font-sans">Nama Anggota</th>
-                    <th className="px-3 py-3 text-right">Simp. Pokok</th>
-                    <th className="px-3 py-3 text-right">Simp. Wajib</th>
-                    <th className="px-3 py-3 text-right">Simp. Manasuka</th>
-                    <th className="px-3 py-3 text-right">Jasa Manasuka</th>
-                    <th className="px-3.5 py-3 text-right bg-emerald-50/20 dark:bg-emerald-900/5 font-sans">Total Tabungan</th>
-                    <th className="px-3.5 py-3 text-right text-rose-700 dark:text-rose-450 font-sans">Sisa Pinjaman</th>
-                    <th className="px-3.5 py-3 text-right text-indigo-700 dark:text-indigo-400 font-sans bg-indigo-50/20 dark:bg-indigo-900/10">Jasa Pinjaman</th>
-                    <th className="px-3.5 py-3 text-right text-sky-700 dark:text-sky-400 font-sans bg-sky-50/30 dark:bg-sky-900/10">Provisi</th>
-                    <th className="px-3.5 py-3 text-right text-amber-700 dark:text-amber-400 font-sans bg-amber-50/20 dark:bg-amber-900/10">Piutang Warung</th>
-                    <th className="px-3.5 py-3 text-center w-28">Mutasi Angsuran</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3.5 py-3 text-center w-10 border-b border-slate-300 dark:border-slate-700">No</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 border-b border-slate-300 dark:border-slate-700">No. Anggota</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3.5 py-3 font-sans border-b border-slate-300 dark:border-slate-700">Nama Anggota</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right border-b border-slate-300 dark:border-slate-700">Simp. Pokok</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right border-b border-slate-300 dark:border-slate-700">Simp. Wajib</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right border-b border-slate-300 dark:border-slate-700">Simp. Manasuka</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right border-b border-slate-300 dark:border-slate-700">Jasa Manasuka</th>
+                    <th className="sticky top-0 z-20 bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 px-3.5 py-3 text-right font-sans border-b border-emerald-300 dark:border-emerald-800">Total Tabungan</th>
+                    <th className="sticky top-0 z-20 bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300 px-3.5 py-3 text-right font-sans border-b border-rose-300 dark:border-rose-800">Sisa Pinjaman</th>
+                    <th className="sticky top-0 z-20 bg-indigo-100 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-300 px-3.5 py-3 text-right font-sans border-b border-indigo-300 dark:border-indigo-800">Jasa Pinjaman</th>
+                    <th className="sticky top-0 z-20 bg-sky-100 dark:bg-sky-950 text-sky-800 dark:text-sky-300 px-3.5 py-3 text-right font-sans border-b border-sky-300 dark:border-sky-800">Provisi</th>
+                    <th className="sticky top-0 z-20 bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 px-3.5 py-3 text-right font-sans border-b border-amber-300 dark:border-amber-800">Piutang Warung</th>
+                    <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-900 px-3.5 py-3 text-center w-28 border-b border-slate-300 dark:border-slate-700">Mutasi Angsuran</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-750 font-mono text-[11px]">
+                <tbody className="font-mono text-[11px]">
                   {filteredNominatif.length === 0 ? (
                     <tr>
-                      <td colSpan={13} className="px-4 py-10 text-center text-slate-400 italic">Data nominatif tidak ditemukan / Anggota kosong</td>
+                      <td colSpan={13} className="px-4 py-10 text-center text-slate-400 italic border-b border-slate-100 dark:border-slate-750">Data nominatif tidak ditemukan / Anggota kosong</td>
                     </tr>
                   ) : (
                     filteredNominatif.map((item, index) => (
-                      <tr key={item.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-all duration-150 group">
-                        <td className="px-3.5 py-2.5 text-center text-slate-400 font-bold">{index + 1}</td>
-                        <td className="px-3 py-2.5">
+                      <tr key={item.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-700/20 transition-all duration-150 group">
+                        <td className="px-3.5 py-2.5 text-center text-slate-400 font-bold border-b border-slate-100 dark:border-slate-750">{index + 1}</td>
+                        <td className="px-3 py-2.5 border-b border-slate-100 dark:border-slate-750">
                           <button
                             type="button"
                             onClick={() => {
@@ -5370,7 +5866,7 @@ export function LaporanView({
                             <ArrowUpRight className="w-3 h-3 opacity-0 group-hover/btn:opacity-100 text-emerald-600 dark:text-emerald-400 transition shrink-0" />
                           </button>
                         </td>
-                        <td className="px-3.5 py-2.5 font-sans font-semibold text-slate-800 dark:text-slate-150">
+                        <td className="px-3.5 py-2.5 font-sans font-semibold text-slate-800 dark:text-slate-150 border-b border-slate-100 dark:border-slate-750">
                           <button
                             type="button"
                             onClick={() => {
@@ -5391,16 +5887,16 @@ export function LaporanView({
                             )}
                           </button>
                         </td>
-                        <td className="px-3 py-2.5 text-right">{formatRupiah(item.pokok)}</td>
-                        <td className="px-3 py-2.5 text-right">{formatRupiah(item.wajib)}</td>
-                        <td className="px-3 py-2.5 text-right">{formatRupiah(item.sukarela)}</td>
-                        <td className="px-3 py-2.5 text-right font-medium text-emerald-700 dark:text-emerald-400">
+                        <td className="px-3 py-2.5 text-right border-b border-slate-100 dark:border-slate-750">{formatRupiah(item.pokok)}</td>
+                        <td className="px-3 py-2.5 text-right border-b border-slate-100 dark:border-slate-750">{formatRupiah(item.wajib)}</td>
+                        <td className="px-3 py-2.5 text-right border-b border-slate-100 dark:border-slate-750">{formatRupiah(item.sukarela)}</td>
+                        <td className="px-3 py-2.5 text-right font-medium text-emerald-700 dark:text-emerald-400 border-b border-slate-100 dark:border-slate-750">
                           {item.jasaManasuka > 0 ? formatRupiah(item.jasaManasuka) : <span className="text-slate-400">Rp 0</span>}
                         </td>
-                        <td className="px-3.5 py-2.5 text-right font-bold text-emerald-800 dark:text-emerald-400 bg-emerald-50/10 dark:bg-emerald-900/5">
+                        <td className="px-3.5 py-2.5 text-right font-bold text-emerald-800 dark:text-emerald-400 bg-emerald-50/10 dark:bg-emerald-900/5 border-b border-slate-100 dark:border-slate-750">
                           {formatRupiah(item.totalSimpanan)}
                         </td>
-                        <td className="px-3.5 py-2.5 text-right font-bold text-rose-750 dark:text-rose-450">
+                        <td className="px-3.5 py-2.5 text-right font-bold text-rose-750 dark:text-rose-450 border-b border-slate-100 dark:border-slate-750">
                           {item.sisaPinjaman > 0 ? (
                             <button
                               type="button"
@@ -5418,16 +5914,16 @@ export function LaporanView({
                             </button>
                           ) : '-'}
                         </td>
-                        <td className="px-3.5 py-2.5 text-right font-bold text-indigo-700 dark:text-indigo-400 bg-indigo-50/20 dark:bg-indigo-900/10">
+                        <td className="px-3.5 py-2.5 text-right font-bold text-indigo-700 dark:text-indigo-400 bg-indigo-50/20 dark:bg-indigo-900/10 border-b border-slate-100 dark:border-slate-750">
                           {item.jasaPinjaman > 0 ? formatRupiah(item.jasaPinjaman) : '-'}
                         </td>
-                        <td className="px-3.5 py-2.5 text-right font-bold text-sky-700 dark:text-sky-400 bg-sky-50/20 dark:bg-sky-900/10">
+                        <td className="px-3.5 py-2.5 text-right font-bold text-sky-700 dark:text-sky-400 bg-sky-50/20 dark:bg-sky-900/10 border-b border-slate-100 dark:border-slate-750">
                           {item.provisi > 0 ? formatRupiah(item.provisi) : '-'}
                         </td>
-                        <td className="px-3.5 py-2.5 text-right font-bold text-amber-700 dark:text-amber-400 bg-amber-50/20 dark:bg-amber-900/10">
+                        <td className="px-3.5 py-2.5 text-right font-bold text-amber-700 dark:text-amber-400 bg-amber-50/20 dark:bg-amber-900/10 border-b border-slate-100 dark:border-slate-750">
                           {item.sisaPiutangWarung > 0 ? formatRupiah(item.sisaPiutangWarung) : '-'}
                         </td>
-                        <td className="px-3.5 py-2.5 text-center font-sans">
+                        <td className="px-3.5 py-2.5 text-center font-sans border-b border-slate-100 dark:border-slate-750">
                           <div className="flex items-center justify-center gap-1.5">
                             <button
                               type="button"
@@ -5459,19 +5955,19 @@ export function LaporanView({
                   )}
                 </tbody>
                 {filteredNominatif.length > 0 && (
-                  <tfoot className="bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 font-mono font-bold text-slate-800 dark:text-slate-100 text-[11px]">
+                  <tfoot className="sticky bottom-0 z-20 bg-slate-100 dark:bg-slate-900 border-t-2 border-slate-300 dark:border-slate-700 font-mono font-bold text-slate-800 dark:text-slate-100 text-[11px] shadow-lg">
                     <tr>
-                      <td colSpan={3} className="px-4 py-3 text-right font-sans uppercase text-[10px] tracking-wider text-slate-400 font-bold">TOTAL NOMINATIF:</td>
-                      <td className="px-3 py-3 text-right text-slate-900 dark:text-slate-100">{formatRupiah(nominatifTotals.pokok)}</td>
-                      <td className="px-3 py-3 text-right text-slate-900 dark:text-slate-100">{formatRupiah(nominatifTotals.wajib)}</td>
-                      <td className="px-3 py-3 text-right text-slate-900 dark:text-slate-100">{formatRupiah(nominatifTotals.sukarela)}</td>
-                      <td className="px-3 py-3 text-right font-bold text-emerald-700 dark:text-emerald-400">{formatRupiah(nominatifTotals.jasaManasuka)}</td>
-                      <td className="px-3.5 py-3 text-right text-emerald-700 dark:text-emerald-400 bg-emerald-50/20 dark:bg-emerald-900/10 text-xs">{formatRupiah(nominatifTotals.totalSimpanan)}</td>
-                      <td className="px-3.5 py-3 text-right text-rose-700 dark:text-rose-450 text-xs">{formatRupiah(nominatifTotals.sisaPinjaman)}</td>
-                      <td className="px-3.5 py-3 text-right text-indigo-700 dark:text-indigo-400 bg-indigo-50/30 dark:bg-indigo-900/20 text-xs">{formatRupiah(nominatifTotals.jasaPinjaman)}</td>
-                      <td className="px-3.5 py-3 text-right text-sky-700 dark:text-sky-400 bg-sky-50/30 dark:bg-sky-900/20 text-xs">{formatRupiah(nominatifTotals.provisi)}</td>
-                      <td className="px-3.5 py-3 text-right text-amber-700 dark:text-amber-400 bg-amber-50/20 dark:bg-amber-900/10 text-xs">{formatRupiah(nominatifTotals.sisaPiutangWarung)}</td>
-                      <td></td>
+                      <td colSpan={3} className="sticky bottom-0 z-20 bg-slate-100 dark:bg-slate-900 px-4 py-3 text-right font-sans uppercase text-[10px] tracking-wider text-slate-500 font-bold border-t-2 border-slate-300 dark:border-slate-700">TOTAL NOMINATIF:</td>
+                      <td className="sticky bottom-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right text-slate-900 dark:text-slate-100 border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.pokok)}</td>
+                      <td className="sticky bottom-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right text-slate-900 dark:text-slate-100 border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.wajib)}</td>
+                      <td className="sticky bottom-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right text-slate-900 dark:text-slate-100 border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.sukarela)}</td>
+                      <td className="sticky bottom-0 z-20 bg-slate-100 dark:bg-slate-900 px-3 py-3 text-right font-bold text-emerald-700 dark:text-emerald-400 border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.jasaManasuka)}</td>
+                      <td className="sticky bottom-0 z-20 bg-emerald-100/90 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 px-3.5 py-3 text-right text-xs border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.totalSimpanan)}</td>
+                      <td className="sticky bottom-0 z-20 bg-rose-100/90 dark:bg-rose-950 text-rose-800 dark:text-rose-300 px-3.5 py-3 text-right text-xs border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.sisaPinjaman)}</td>
+                      <td className="sticky bottom-0 z-20 bg-indigo-100/90 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-300 px-3.5 py-3 text-right text-xs border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.jasaPinjaman)}</td>
+                      <td className="sticky bottom-0 z-20 bg-sky-100/90 dark:bg-sky-950 text-sky-800 dark:text-sky-300 px-3.5 py-3 text-right text-xs border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.provisi)}</td>
+                      <td className="sticky bottom-0 z-20 bg-amber-100/90 dark:bg-amber-950 text-amber-800 dark:text-amber-300 px-3.5 py-3 text-right text-xs border-t-2 border-slate-300 dark:border-slate-700">{formatRupiah(nominatifTotals.sisaPiutangWarung)}</td>
+                      <td className="sticky bottom-0 z-20 bg-slate-100 dark:bg-slate-900 border-t-2 border-slate-300 dark:border-slate-700"></td>
                     </tr>
                   </tfoot>
                 )}
@@ -5479,6 +5975,381 @@ export function LaporanView({
             </div>
           </motion.div>
         )}
+
+        {activeReportTab === 'rekapSimpananWajib' && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white dark:bg-slate-800 p-6 rounded-2xl border border-slate-150 dark:border-slate-700 shadow-sm space-y-6"
+          >
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-slate-150 dark:border-slate-700 pb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 text-amber-500"/>
+                  <span>Rekap Laporan Anggota Belum Bayar Simpanan Wajib</span>
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  Monitoring kepatuhan iuran Simpanan Wajib ({formatRupiah(setup?.nominalSimpananWajib || 50000)}/bulan) untuk periode bulan berjalan dan bulan pilihan.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button 
+                  onClick={handleExportRekapWajibExcel}
+                  className="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 hover:bg-emerald-50 hover:text-emerald-700 dark:hover:bg-emerald-950/40 dark:hover:text-emerald-300 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer border border-slate-200 dark:border-slate-600 shadow-xs"
+                >
+                  <Download className="w-3.5 h-3.5"/> Export Excel
+                </button>
+                <button 
+                  onClick={handlePrintRekapWajib}
+                  className="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer border border-slate-200 dark:border-slate-600 shadow-xs text-slate-700 dark:text-slate-200"
+                >
+                  <Printer className="w-3.5 h-3.5"/> Cetak Laporan
+                </button>
+              </div>
+            </div>
+
+            {/* Metric Summary Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+              <div className="p-4 bg-slate-50 dark:bg-slate-900/60 rounded-xl border border-slate-200 dark:border-slate-700/80">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Total Anggota</span>
+                <p className="text-xl font-extrabold text-slate-800 dark:text-slate-100 mt-1 font-mono">
+                  {rekapWajibData.totalMembers} <span className="text-xs font-sans font-normal text-slate-400">Orang</span>
+                </p>
+                <span className="text-[10px] text-slate-500 mt-1 block">Seluruh anggota terdaftar</span>
+              </div>
+
+              <div className="p-4 bg-emerald-50/50 dark:bg-emerald-950/20 rounded-xl border border-emerald-200/80 dark:border-emerald-800/60">
+                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Sudah Lunas</span>
+                <p className="text-xl font-extrabold text-emerald-700 dark:text-emerald-400 mt-1 font-mono">
+                  {rekapWajibData.paidCount} <span className="text-xs font-sans font-normal text-emerald-600 dark:text-emerald-400">Orang</span>
+                </p>
+                <span className="text-[10px] text-emerald-600 font-mono mt-1 block">
+                  Terkumpul: {formatRupiah(rekapWajibData.totalCollected)}
+                </span>
+              </div>
+
+              <div className="p-4 bg-rose-50/60 dark:bg-rose-950/20 rounded-xl border border-rose-200/80 dark:border-rose-800/60">
+                <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider block">Belum Membayar</span>
+                <p className="text-xl font-extrabold text-rose-600 dark:text-rose-400 mt-1 font-mono">
+                  {rekapWajibData.unpaidCount} <span className="text-xs font-sans font-normal text-rose-500">Orang</span>
+                </p>
+                <span className="text-[10px] text-rose-600 font-mono mt-1 block">
+                  Tunggakan: {formatRupiah(rekapWajibData.totalUnpaidNominal)}
+                </span>
+              </div>
+
+              <div className="p-4 bg-amber-50/50 dark:bg-amber-950/20 rounded-xl border border-amber-200/80 dark:border-amber-800/60">
+                <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">Tingkat Kepatuhan</span>
+                <p className="text-xl font-extrabold text-amber-700 dark:text-amber-400 mt-1 font-mono">
+                  {rekapWajibData.kepatuhanPercent}%
+                </p>
+                <div className="w-full bg-slate-200 dark:bg-slate-700 h-1.5 rounded-full mt-2 overflow-hidden">
+                  <div 
+                    className="bg-emerald-500 h-full rounded-full transition-all duration-300"
+                    style={{ width: `${rekapWajibData.kepatuhanPercent}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Filter and Period Controls */}
+            <div className="p-4 bg-slate-50 dark:bg-slate-900/60 rounded-xl border border-slate-200 dark:border-slate-700/80 space-y-3">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                {/* Period Picker */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                    <Calendar className="w-4 h-4 text-emerald-600" />
+                    <span>Periode Bulan:</span>
+                  </span>
+                  <input 
+                    type="month"
+                    value={rekapWajibMonth}
+                    onChange={(e) => {
+                      if (e.target.value) setRekapWajibMonth(e.target.value);
+                    }}
+                    className="px-3 py-1.5 text-xs bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-800 dark:text-slate-200 font-bold cursor-pointer shadow-xs focus:outline-emerald-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setRekapWajibMonth(currentRunningMonthYM)}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition cursor-pointer ${
+                      rekapWajibMonth === currentRunningMonthYM 
+                        ? 'bg-emerald-600 text-white border-emerald-700 shadow-xs' 
+                        : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    Bulan Berjalan ({formatYearMonthIndo(currentRunningMonthYM)})
+                  </button>
+                  <span className="text-xs font-bold text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-950/40 px-2.5 py-1 rounded-lg">
+                    {formatYearMonthIndo(rekapWajibMonth)}
+                  </span>
+                </div>
+
+                {/* Status Filter Buttons */}
+                <div className="flex bg-slate-200/80 dark:bg-slate-800 p-1 rounded-xl text-xs font-bold gap-1 self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => setRekapWajibStatusFilter('belum_bayar')}
+                    className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 ${
+                      rekapWajibStatusFilter === 'belum_bayar' 
+                        ? 'bg-rose-600 text-white shadow-xs' 
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                    }`}
+                  >
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    <span>Belum Bayar ({rekapWajibData.unpaidCount})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRekapWajibStatusFilter('sudah_bayar')}
+                    className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 ${
+                      rekapWajibStatusFilter === 'sudah_bayar' 
+                        ? 'bg-emerald-600 text-white shadow-xs' 
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Sudah Lunas ({rekapWajibData.paidCount})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRekapWajibStatusFilter('semua')}
+                    className={`px-3 py-1.5 rounded-lg transition cursor-pointer ${
+                      rekapWajibStatusFilter === 'semua' 
+                        ? 'bg-white dark:bg-slate-900 text-slate-850 dark:text-slate-200 shadow-xs' 
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                    }`}
+                  >
+                    Semua ({rekapWajibData.totalMembers})
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Bar */}
+              <div className="relative">
+                <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+                <input 
+                  type="text"
+                  placeholder="Cari anggota berdasarkan nama, nomor anggota, no telepon, atau pekerjaan..."
+                  value={rekapWajibSearch}
+                  onChange={(e) => setRekapWajibSearch(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2 text-xs bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-emerald-600 font-medium placeholder-slate-400"
+                />
+              </div>
+            </div>
+
+            {/* Table of Members Rekap */}
+            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full table-auto text-left text-xs text-slate-650 dark:text-slate-300">
+                <thead className="bg-slate-50 dark:bg-slate-900 text-slate-500 font-bold uppercase border-b border-slate-200 dark:border-slate-700 text-[10px]">
+                  <tr>
+                    <th className="px-4 py-3 text-center w-12">No</th>
+                    <th className="px-4 py-3">No. Anggota</th>
+                    <th className="px-4 py-3">Nama Anggota</th>
+                    <th className="px-4 py-3">Unit / Pekerjaan</th>
+                    <th className="px-4 py-3">No. HP</th>
+                    <th className="px-4 py-3 text-center">Status Iuran ({formatYearMonthIndo(rekapWajibMonth)})</th>
+                    <th className="px-4 py-3 text-right">Nominal Tunggakan</th>
+                    <th className="px-4 py-3">Catatan / Tunggakan Lain</th>
+                    <th className="px-4 py-3 text-center w-36">Aksi</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700 font-mono text-[11px]">
+                  {filteredRekapWajibRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="px-4 py-12 text-center text-slate-400 italic">
+                        {rekapWajibStatusFilter === 'belum_bayar' 
+                          ? `🎉 Luar biasa! Seluruh anggota telah melunasi Simpanan Wajib untuk periode ${formatYearMonthIndo(rekapWajibMonth)}.`
+                          : "Tidak ada data anggota yang cocok dengan filter pencarian."
+                        }
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredRekapWajibRows.map((r, index) => {
+                      const expNominal = setup?.nominalSimpananWajib || 50000;
+                      const waText = encodeURIComponent(
+                        `Halo Bpk/Ibu *${r.member.nama}*,\n\nKami dari *${setup?.namaKoperasi || 'Koperasi Dana Segar'}* ingin menginformasikan perihal iuran bulanan *Simpanan Wajib* untuk periode *${formatYearMonthIndo(rekapWajibMonth)}* sebesar *${formatRupiah(expNominal)}* tercatat belum lunas.\n\nMohon dapat melakukan setoran melalui kantor kas koperasi atau transfer via rekening resmi koperasi. Terima kasih atas kerja samanya. 🙏🌱`
+                      );
+                      const cleanPhone = (r.member.noHp || '').replace(/\D/g, '');
+                      const formattedPhone = cleanPhone.startsWith('0') ? `62${cleanPhone.slice(1)}` : cleanPhone;
+                      const waUrl = formattedPhone ? `https://wa.me/${formattedPhone}?text=${waText}` : undefined;
+
+                      return (
+                        <tr 
+                          key={r.member.id} 
+                          className={`hover:bg-slate-50/80 dark:hover:bg-slate-700/20 transition-all duration-150 ${
+                            !r.isPaid ? 'bg-amber-50/20 dark:bg-amber-950/10' : ''
+                          }`}
+                        >
+                          <td className="px-4 py-2.5 text-center text-slate-400 font-bold">{index + 1}</td>
+                          <td className="px-4 py-2.5 font-bold text-slate-800 dark:text-slate-200">{r.member.noAnggota}</td>
+                          <td className="px-4 py-2.5 font-sans font-semibold text-slate-800 dark:text-slate-100">
+                            {r.member.nama}
+                          </td>
+                          <td className="px-4 py-2.5 font-sans text-slate-600 dark:text-slate-350">{r.member.pekerjaan || '-'}</td>
+                          <td className="px-4 py-2.5 text-slate-500">{r.member.noHp || '-'}</td>
+                          <td className="px-4 py-2.5 text-center font-sans">
+                            {r.isPaid ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" /> LUNAS
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-300 dark:border-rose-800 animate-pulse">
+                                <AlertCircle className="w-3 h-3 text-rose-600" /> BELUM BAYAR
+                              </span>
+                            )}
+                          </td>
+                          <td className={`px-4 py-2.5 text-right font-bold ${!r.isPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400'}`}>
+                            {!r.isPaid ? formatRupiah(r.kekurangan) : '-'}
+                          </td>
+                          <td className="px-4 py-2.5 font-sans text-[10.5px]">
+                            {r.priorUnpaidMonths.length > 0 ? (
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <span className="text-amber-700 dark:text-amber-400 font-semibold">Tunggakan lalu:</span>
+                                {r.priorUnpaidMonths.map(pm => (
+                                  <span key={pm} className="px-1.5 py-0.2 bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300 rounded text-[9px] font-bold">
+                                    {pm}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : r.isPaid ? (
+                              <span className="text-emerald-700 dark:text-emerald-400 italic">
+                                Lunas ({r.paymentDate || '-'})
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 italic">Iuran bulan berjalan</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5 text-center font-sans">
+                            <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() => setCalendarModalMember(r.member)}
+                                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer border border-slate-250 dark:border-slate-600 whitespace-nowrap shadow-2xs"
+                                title="Buka Kalender 12 Bulan (4 Kolom x 3 Baris) Iuran Anggota"
+                              >
+                                <Calendar className="w-3 h-3 text-indigo-600 dark:text-indigo-400" />
+                                <span>Kalender</span>
+                              </button>
+                              {!r.isPaid ? (
+                                <>
+                                  {onNavigateToSimpanan && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onNavigateToSimpanan(r.member.id, r.member.nama)}
+                                      className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap"
+                                      title="Input Setoran Simpanan Wajib di Kas Masuk"
+                                    >
+                                      <Plus className="w-3 h-3" /> Bayar
+                                    </button>
+                                  )}
+                                  {waUrl && (
+                                    <a
+                                      href={waUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="px-2 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer shadow-xs whitespace-nowrap"
+                                      title="Kirim pengingat WhatsApp ke anggota"
+                                    >
+                                      <MessageSquare className="w-3 h-3" /> WA
+                                    </a>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="text-emerald-600 dark:text-emerald-400 text-[10px] font-semibold flex items-center gap-1 justify-center">
+                                  <Check className="w-3.5 h-3.5" /> Terbayar
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+                {filteredRekapWajibRows.length > 0 && (
+                  <tfoot className="bg-slate-50 dark:bg-slate-900 border-t-2 border-slate-200 dark:border-slate-700 font-mono font-bold text-slate-800 dark:text-slate-100 text-[11px]">
+                    <tr>
+                      <td colSpan={6} className="px-4 py-3 text-right font-sans uppercase text-[10px] tracking-wider text-slate-500 font-bold">
+                        TOTAL ESTIMASI TUNGGAKAN DITAMPILKAN ({filteredRekapWajibRows.filter(r => !r.isPaid).length} Anggota):
+                      </td>
+                      <td className="px-4 py-3 text-right text-rose-600 dark:text-rose-400 text-xs bg-rose-50/50 dark:bg-rose-950/20 font-bold">
+                        {formatRupiah(filteredRekapWajibRows.filter(r => !r.isPaid).reduce((acc, c) => acc + c.kekurangan, 0))}
+                      </td>
+                      <td colSpan={2} className="px-4 py-3"></td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </motion.div>
+        )}
+
+        {/* MODAL KALENDER SIMPANAN WAJIB ANGGOTA (LAPORAN) */}
+        <AnimatePresence>
+          {calendarModalMember && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-2xl shadow-xl overflow-hidden border border-slate-200 dark:border-slate-800 p-6 space-y-4"
+              >
+                <div className="flex items-center justify-between border-b border-slate-150 dark:border-slate-800 pb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 flex items-center justify-center font-bold">
+                      <Calendar className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100">
+                        Kalender Iuran Simpanan Wajib Anggota
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        {calendarModalMember.nama} ({calendarModalMember.noAnggota})
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCalendarModalMember(null)}
+                    className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <KalenderSimpananWajib
+                  memberId={calendarModalMember.id}
+                  memberNama={calendarModalMember.nama}
+                  memberNoAnggota={calendarModalMember.noAnggota}
+                  simpananList={simpanan}
+                  nominalWajib={setup?.nominalSimpananWajib || 50000}
+                  selectedMonthYM={rekapWajibMonth}
+                  onSelectMonth={(ym) => {
+                    if (onNavigateToSimpanan) {
+                      onNavigateToSimpanan(calendarModalMember.id, calendarModalMember.nama);
+                    }
+                    setCalendarModalMember(null);
+                  }}
+                />
+
+                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
+                  <span className="text-slate-400 text-[11px]">
+                    💡 Klik salah satu kotak bulan untuk langsung membuka kas masuk anggota
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCalendarModalMember(null)}
+                    className="px-4 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold rounded-lg cursor-pointer transition self-end sm:self-auto"
+                  >
+                    Tutup
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
 
         {activeReportTab === 'simpanan' && (
           <motion.div 
@@ -5507,6 +6378,24 @@ export function LaporanView({
                   <Download className="w-3.5 h-3.5"/> PDF
                 </button>
               </div>
+            </div>
+
+            {/* Quick banner to jump to Rekap Belum Bayar */}
+            <div className="p-3 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/30 dark:to-orange-950/20 border border-amber-200 dark:border-amber-800/60 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
+              <div className="flex items-center gap-2 text-amber-850 dark:text-amber-300 font-medium">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>
+                  Lihat laporan rekapitulasi anggota yang <strong>belum membayar Simpanan Wajib</strong> pada bulan berjalan ({formatYearMonthIndo(currentRunningMonthYM)}).
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveReportTab('rekapSimpananWajib')}
+                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs cursor-pointer transition shadow-xs whitespace-nowrap self-end sm:self-auto flex items-center gap-1"
+              >
+                <span>Buka Rekap Belum Bayar</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
             </div>
 
             {/* Filter controls */}
@@ -5547,6 +6436,7 @@ export function LaporanView({
                     <th className="px-4 py-3">No. Anggota</th>
                     <th className="px-4 py-3">Nama Anggota</th>
                     <th className="px-4 py-3 text-center">Jenis Simpanan</th>
+                    <th className="px-4 py-3 text-center">Bulan / Periode</th>
                     <th className="px-4 py-3 text-right">Jumlah Setoran</th>
                     <th className="px-4 py-3 pl-6">Keterangan</th>
                     {userRole !== 'pengawas' && (onDeleteSimpanan || onEditSimpanan) && <th className="px-4 py-3 text-center w-24">Aksi</th>}
@@ -5555,7 +6445,7 @@ export function LaporanView({
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700 font-mono text-[11px]">
                   {filteredSimpananReport.length === 0 ? (
                     <tr>
-                      <td colSpan={userRole !== 'pengawas' && (onDeleteSimpanan || onEditSimpanan) ? 8 : 7} className="px-4 py-10 text-center text-slate-400 italic">Tidak ada data simpanan tercatat pada periode ini</td>
+                      <td colSpan={userRole !== 'pengawas' && (onDeleteSimpanan || onEditSimpanan) ? 9 : 8} className="px-4 py-10 text-center text-slate-400 italic">Tidak ada data simpanan tercatat pada periode ini</td>
                     </tr>
                   ) : (
                     filteredSimpananReport.map((item, index) => {
@@ -5575,6 +6465,15 @@ export function LaporanView({
                             }`}>
                               {item.jumlah < 0 ? 'Penarikan Sukarela' : item.jenis}
                             </span>
+                          </td>
+                          <td className="px-4 py-2.5 text-center font-sans text-[10px]">
+                            {item.jenis === 'Wajib' ? (
+                              <span className="px-2 py-0.5 rounded-full font-bold bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                                {item.bulan || (item.periodeBulan ? formatYearMonthIndo(item.periodeBulan) : (item.tanggal ? formatYearMonthIndo(item.tanggal.substring(0, 7)) : '-'))}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
                           </td>
                           <td className={`px-4 py-2.5 text-right font-bold ${item.jumlah < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-800 dark:text-slate-200'}`}>
                             {item.jumlah < 0 ? `-${formatRupiah(Math.abs(item.jumlah))}` : formatRupiah(item.jumlah)}
@@ -5612,7 +6511,7 @@ export function LaporanView({
                 {filteredSimpananReport.length > 0 && (
                   <tfoot className="bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 font-mono font-bold text-slate-800 dark:text-slate-100 text-[11px]">
                     <tr>
-                      <td colSpan={5} className="px-4 py-3 text-right font-sans uppercase text-[10px] tracking-wider text-slate-400 font-bold">TOTAL SIMPANAN SE-PERIODE:</td>
+                      <td colSpan={6} className="px-4 py-3 text-right font-sans uppercase text-[10px] tracking-wider text-slate-400 font-bold">TOTAL SIMPANAN SE-PERIODE:</td>
                       <td className="px-4 py-3 text-right text-emerald-700 dark:text-emerald-400 text-xs bg-emerald-50/20 dark:bg-emerald-900/10 font-bold">{formatRupiah(totalSimpananReportSum)}</td>
                       <td colSpan={(onDeleteSimpanan || onEditSimpanan) ? 2 : 1} className="px-4 py-3"></td>
                     </tr>
@@ -6568,30 +7467,35 @@ export function LaporanView({
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-5">
+                  <div className="space-y-4">
                     {/* Ratio Presets and Slider */}
-                    <div className="lg:col-span-8 space-y-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-semibold text-slate-600 dark:text-slate-400">Preset Rasio Baku:</span>
-                        {[
-                          { label: "50 : 50 (Seimbang)", modal: 50 },
-                          { label: "40 : 60 (Prioritas Usaha)", modal: 40 },
-                          { label: "60 : 40 (Prioritas Simpanan)", modal: 60 },
-                          { label: "70 : 30", modal: 70 }
-                        ].map((preset) => (
-                          <button
-                            key={preset.label}
-                            type="button"
-                            onClick={() => setPersenJasaModal(preset.modal)}
-                            className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition cursor-pointer border ${
-                              persenJasaModal === preset.modal
-                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
-                                : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-750'
-                            }`}
-                          >
-                            {preset.label}
-                          </button>
-                        ))}
+                    <div className="bg-white dark:bg-slate-850 p-4 rounded-xl border border-slate-200 dark:border-slate-750 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-semibold text-slate-600 dark:text-slate-400">Preset Rasio Baku:</span>
+                          {[
+                            { label: "50 : 50 (Seimbang)", modal: 50 },
+                            { label: "40 : 60 (Prioritas Usaha)", modal: 40 },
+                            { label: "60 : 40 (Prioritas Simpanan)", modal: 60 },
+                            { label: "70 : 30", modal: 70 }
+                          ].map((preset) => (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() => handleSetPersenJasaModal(preset.modal)}
+                              className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition cursor-pointer border ${
+                                persenJasaModal === preset.modal
+                                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                                  : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-750'
+                              }`}
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+                        <span className="text-xs font-mono font-bold text-slate-500 dark:text-slate-400">
+                          JMA {persenJasaModal}% : JUA {persenJasaUsaha}%
+                        </span>
                       </div>
 
                       {/* Slider Control */}
@@ -6612,7 +7516,7 @@ export function LaporanView({
                           max="90"
                           step="5"
                           value={persenJasaModal}
-                          onChange={(e) => setPersenJasaModal(Number(e.target.value))}
+                          onChange={(e) => handleSetPersenJasaModal(Number(e.target.value))}
                           className="w-full accent-emerald-600 h-2 bg-slate-200 dark:bg-slate-700 rounded-lg cursor-pointer"
                         />
                         <div className="flex justify-between text-[10px] text-slate-400 font-mono">
@@ -6623,22 +7527,172 @@ export function LaporanView({
                       </div>
                     </div>
 
-                    {/* Savings Option & Explanation */}
-                    <div className="lg:col-span-4 bg-white dark:bg-slate-850 p-3.5 rounded-xl border border-slate-200 dark:border-slate-750 space-y-2.5">
-                      <label className="flex items-start gap-2 text-xs font-semibold text-slate-750 dark:text-slate-200 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={includeSukarelaInJMA}
-                          onChange={(e) => setIncludeSukarelaInJMA(e.target.checked)}
-                          className="mt-0.5 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer"
-                        />
-                        <span>Sertakan Simpanan Sukarela dalam Dasar Jasa Modal (JMA)</span>
-                      </label>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                        {includeSukarelaInJMA 
-                          ? "✓ JMA dihitung dari: Simpanan Pokok + Simpanan Wajib + Simpanan Sukarela/Manasuka."
-                          : "• JMA hanya dihitung dari: Simpanan Pokok + Simpanan Wajib (Simpanan Sukarela dikecualikan)."}
-                      </p>
+                    {/* Checklists for JMA and JUA */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* CARD 1: INSTRUMEN JASA MODAL (JMA) */}
+                      <div className="bg-white dark:bg-slate-850 p-4 rounded-xl border border-teal-200/80 dark:border-teal-900/60 space-y-3 shadow-2xs">
+                        <div className="flex items-center justify-between border-b border-teal-100 dark:border-teal-900/40 pb-2">
+                          <span className="text-xs font-bold text-teal-800 dark:text-teal-300 flex items-center gap-1.5">
+                            <Coins className="w-4 h-4 text-teal-600" />
+                            1. Instrumen Dasar Jasa Modal (JMA)
+                          </span>
+                          <span className="text-[10px] font-mono font-bold bg-teal-50 dark:bg-teal-950 text-teal-700 dark:text-teal-300 px-2 py-0.5 rounded-full border border-teal-200 dark:border-teal-800">
+                            Pool {persenJasaModal}%
+                          </span>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="flex items-start gap-2 text-xs font-semibold text-slate-700 dark:text-slate-300 opacity-90 cursor-default">
+                            <input
+                              type="checkbox"
+                              checked={true}
+                              disabled={true}
+                              className="mt-0.5 rounded text-teal-600 cursor-not-allowed"
+                            />
+                            <div>
+                              <span>Simpanan Pokok & Simpanan Wajib</span>
+                              <p className="text-[10.5px] text-slate-400 font-normal">Modal primer wajib seluruh anggota koperasi (Baku).</p>
+                            </div>
+                          </label>
+
+                          <label className="flex items-start gap-2 text-xs font-semibold text-slate-750 dark:text-slate-200 cursor-pointer pt-1 border-t border-slate-100 dark:border-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={includeSukarelaInJMA}
+                              onChange={(e) => handleToggleIncludeSukarelaInJMA(e.target.checked)}
+                              className="mt-0.5 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
+                            />
+                            <div>
+                              <span className="text-slate-900 dark:text-slate-100 font-bold">Sertakan Simpanan Sukarela / Manasuka</span>
+                              <p className="text-[10.5px] text-slate-500 dark:text-slate-400 font-normal">
+                                {includeSukarelaInJMA 
+                                  ? "✓ Dihitung: Simpanan Pokok + Wajib + Sukarela."
+                                  : "• Dikecualikan: Hanya Pokok + Wajib yang dihitung."}
+                              </p>
+                            </div>
+                          </label>
+                        </div>
+
+                        <div className="text-[11px] text-teal-700 dark:text-teal-300 bg-teal-50/60 dark:bg-teal-950/30 p-2 rounded-lg font-mono">
+                          Total Modal Eligible: <strong>{formatRupiah(shuPerAnggotaCalculations.totalSimpananEligibleAll)}</strong>
+                        </div>
+                      </div>
+
+                      {/* CARD 2: INSTRUMEN JASA USAHA (JUA) - DILENGKAPI CEKLIST SUMBER PENDAPATAN */}
+                      <div className="bg-white dark:bg-slate-850 p-4 rounded-xl border border-indigo-200/80 dark:border-indigo-900/60 space-y-3 shadow-2xs">
+                        <div className="flex items-center justify-between border-b border-indigo-100 dark:border-indigo-900/40 pb-2">
+                          <span className="text-xs font-bold text-indigo-800 dark:text-indigo-300 flex items-center gap-1.5">
+                            <ShoppingBag className="w-4 h-4 text-indigo-600" />
+                            2. Sumber Pendapatan Jasa Usaha (JUA)
+                          </span>
+                          <span className="text-[10px] font-mono font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded-full border border-indigo-200 dark:border-indigo-800">
+                            Pool {persenJasaUsaha}%
+                          </span>
+                        </div>
+
+                        <div className="space-y-2.5">
+                          {/* Checklist 1: Jasa Pinjaman SP */}
+                          <label className="flex items-start gap-2 text-xs font-semibold text-slate-750 dark:text-slate-200 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={includeJasaPinjamanInJUA}
+                              onChange={(e) => handleToggleIncludeJasaPinjamanInJUA(e.target.checked)}
+                              className="mt-0.5 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                            <div>
+                              <span className="text-slate-900 dark:text-slate-100 font-bold">Unit Jasa (Bunga Pinjaman SP)</span>
+                              <p className="text-[10.5px] text-slate-500 dark:text-slate-400 font-normal">
+                                Bunga/jasa angsuran kredit yang telah disetor anggota ke koperasi.
+                              </p>
+                            </div>
+                          </label>
+
+                          {/* Checklist 2: Transaksi Toko / Warung */}
+                          <label className="flex items-start gap-2 text-xs font-semibold text-slate-750 dark:text-slate-200 cursor-pointer pt-1 border-t border-slate-100 dark:border-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={includeWarungInJUA}
+                              onChange={(e) => handleToggleIncludeWarungInJUA(e.target.checked)}
+                              className="mt-0.5 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                            <div>
+                              <span className="text-slate-900 dark:text-slate-100 font-bold">
+                                Unit Warung (Toko Koperasi)
+                              </span>
+                              <p className="text-[10.5px] text-slate-500 dark:text-slate-400 font-normal">
+                                Perputaran kasbon & belanja warung anggota (Hilangkan centang jika hanya ingin dari SP).
+                              </p>
+                            </div>
+                          </label>
+
+                          {/* Checklist 3: Simpanan Sukarela */}
+                          <label className="flex items-start gap-2 text-xs font-semibold text-slate-750 dark:text-slate-200 cursor-pointer pt-1 border-t border-slate-100 dark:border-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={includeSukarelaInJUA}
+                              onChange={(e) => handleToggleIncludeSukarelaInJUA(e.target.checked)}
+                              className="mt-0.5 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                            <div>
+                              <span className="text-slate-900 dark:text-slate-100 font-bold">
+                                Simpanan Sukarela (Tabungan Manasuka)
+                              </span>
+                              <p className="text-[10.5px] text-slate-500 dark:text-slate-400 font-normal">
+                                Setoran saldo tabungan sukarela dimasukkan sebagai partisipasi usaha anggota.
+                              </p>
+                            </div>
+                          </label>
+
+                          {/* Checklist 4: Unit Provisi & Administrasi */}
+                          <label className="flex items-start gap-2 text-xs font-semibold text-slate-750 dark:text-slate-200 cursor-pointer pt-1 border-t border-slate-100 dark:border-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={includeProvisiInJUA}
+                              onChange={(e) => handleToggleIncludeProvisiInJUA(e.target.checked)}
+                              className="mt-0.5 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                            <div>
+                              <span className="text-slate-900 dark:text-slate-100 font-bold">
+                                Unit Provisi (Administrasi Akad Pinjaman)
+                              </span>
+                              <p className="text-[10.5px] text-slate-500 dark:text-slate-400 font-normal">
+                                Biaya provisi administrasi saat pencairan pinjaman anggota.
+                              </p>
+                            </div>
+                          </label>
+                        </div>
+
+                        {/* Status Callout sesuai pilihan checklist */}
+                        {!includeWarungInJUA && includeJasaPinjamanInJUA ? (
+                          <div className="p-2.5 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl text-[11px] text-emerald-800 dark:text-emerald-300 flex items-start gap-2">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                            <span>
+                              <strong>Sesuai Arahan:</strong> Jasa usaha warung <strong>dikecualikan</strong> dari JUA. Pembagian JUA murni dari instrumen simpan pinjam {includeSukarelaInJUA ? '+ simpanan sukarela' : ''} {includeProvisiInJUA ? '+ provisi' : ''}.
+                            </span>
+                          </div>
+                        ) : includeWarungInJUA ? (
+                          <div className="p-2.5 bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 rounded-xl text-[11px] text-indigo-800 dark:text-indigo-300 flex items-start gap-2">
+                            <Info className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                            <span>
+                              JUA dihitung dengan menyertakan Unit Warung {[includeJasaPinjamanInJUA && 'Unit Jasa SP', includeSukarelaInJUA && 'Simpanan Sukarela', includeProvisiInJUA && 'Unit Provisi'].filter(Boolean).length > 0 ? '+ ' + [includeJasaPinjamanInJUA && 'Unit Jasa SP', includeSukarelaInJUA && 'Simpanan Sukarela', includeProvisiInJUA && 'Unit Provisi'].filter(Boolean).join(' + ') : ''}.
+                            </span>
+                          </div>
+                        ) : !includeJasaPinjamanInJUA && !includeWarungInJUA && !includeSukarelaInJUA && !includeProvisiInJUA ? (
+                          <div className="p-2.5 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 rounded-xl text-[11px] text-rose-800 dark:text-rose-300 flex items-start gap-2">
+                            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                            <span>
+                              ⚠️ Minimal salah satu instrumen usaha harus dicentang untuk menghitung JUA.
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="p-2.5 bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 rounded-xl text-[11px] text-indigo-800 dark:text-indigo-300 flex items-start gap-2">
+                            <Info className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                            <span>
+                              JUA dihitung berdasarkan instrumen yang dicentang ({[includeJasaPinjamanInJUA && 'Unit Jasa', includeSukarelaInJUA && 'Simpanan Sukarela', includeProvisiInJUA && 'Provisi'].filter(Boolean).join(', ')}).
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -6738,7 +7792,8 @@ export function LaporanView({
                       onChange={(e) => setShuAnggotaSortBy(e.target.value as any)}
                       className="px-2.5 py-1.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-sans text-slate-800 dark:text-slate-200 focus:outline-emerald-500 cursor-pointer"
                     >
-                      <option value="total">Total SHU Tertinggi</option>
+                      <option value="pembulatan">SHU Pembulatan 500 Tertinggi</option>
+                      <option value="total">Total SHU Murni Tertinggi</option>
                       <option value="jma">Jasa Modal (JMA) Tertinggi</option>
                       <option value="jua">Jasa Usaha (JUA) Tertinggi</option>
                       <option value="simpanan">Simpanan Terbesar</option>
@@ -6790,8 +7845,12 @@ export function LaporanView({
                           </div>
                         </th>
                         <th className="p-3 text-right bg-emerald-50/70 dark:bg-emerald-950/30">
-                          <div className="font-extrabold text-emerald-800 dark:text-emerald-300">TOTAL SHU</div>
-                          <div className="text-[9px] font-normal text-emerald-600 capitalize">JMA + JUA</div>
+                          <div className="font-semibold text-slate-700 dark:text-slate-300">TOTAL SHU</div>
+                          <div className="text-[9px] font-normal text-slate-500 capitalize">Perhitungan Murni</div>
+                        </th>
+                        <th className="p-3 text-right bg-emerald-100/80 dark:bg-emerald-900/50 border-l border-emerald-200 dark:border-emerald-800">
+                          <div className="font-extrabold text-emerald-900 dark:text-emerald-100">PEMBULATAN 500</div>
+                          <div className="text-[9px] font-semibold text-emerald-700 dark:text-emerald-300 capitalize">SHU Dibayarkan</div>
                         </th>
                         <th className="p-3 text-center w-28">Aksi</th>
                       </tr>
@@ -6799,7 +7858,7 @@ export function LaporanView({
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
                       {filteredSHUMembers.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="p-8 text-center text-slate-400 font-sans">
+                          <td colSpan={9} className="p-8 text-center text-slate-400 font-sans">
                             Tidak ditemukan data anggota yang cocok dengan pencarian.
                           </td>
                         </tr>
@@ -6848,8 +7907,29 @@ export function LaporanView({
                               <div className="font-semibold text-slate-800 dark:text-slate-200">
                                 {formatRupiah(item.totalPartisipasiUsaha)}
                               </div>
-                              <div className="text-[10px] text-slate-400">
-                                Jasa: {formatRupiah(item.jasaPinjamanDibayar)} | Wrg: {formatRupiah(item.belanjaWarung)}
+                              <div className="text-[10px] text-slate-400 space-y-0.5">
+                                {includeJasaPinjamanInJUA && item.jasaPinjamanDibayar > 0 && (
+                                  <div>Jasa SP: {formatRupiah(item.jasaPinjamanDibayar)}</div>
+                                )}
+                                {includeWarungInJUA && item.belanjaWarung > 0 && (
+                                  <div>Warung: {formatRupiah(item.belanjaWarung)}</div>
+                                )}
+                                {includeSukarelaInJUA && item.sSukarela > 0 && (
+                                  <div>Sukarela: {formatRupiah(item.sSukarela)}</div>
+                                )}
+                                {includeProvisiInJUA && (item.provisiDibayar || 0) > 0 && (
+                                  <div>Provisi: {formatRupiah(item.provisiDibayar || 0)}</div>
+                                )}
+                                {!includeWarungInJUA && item.belanjaWarung > 0 && (
+                                  <span className="text-slate-400 block text-[9px] italic">
+                                    (Warung {formatRupiah(item.belanjaWarung)} dikecualikan)
+                                  </span>
+                                )}
+                                {!includeJasaPinjamanInJUA && !includeWarungInJUA && !includeSukarelaInJUA && !includeProvisiInJUA && (
+                                  <span className="text-rose-500 block text-[9px] italic">
+                                    (Tidak ada instrumen dipilih)
+                                  </span>
+                                )}
                               </div>
                             </td>
 
@@ -6863,10 +7943,29 @@ export function LaporanView({
                               </div>
                             </td>
 
-                            {/* TOTAL SHU */}
-                            <td className="p-3 text-right font-mono bg-emerald-50/50 dark:bg-emerald-950/20">
-                              <div className="text-sm font-black text-emerald-700 dark:text-emerald-300">
+                            {/* TOTAL SHU MURNI */}
+                            <td className="p-3 text-right font-mono bg-emerald-50/40 dark:bg-emerald-950/10">
+                              <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
                                 {formatRupiah(item.totalSHU)}
+                              </div>
+                              <div className="text-[9px] text-slate-400">
+                                Murni
+                              </div>
+                            </td>
+
+                            {/* PEMBULATAN 500 (SHU DIBAYARKAN) */}
+                            <td className="p-3 text-right font-mono bg-emerald-100/60 dark:bg-emerald-900/30 border-l border-emerald-200 dark:border-emerald-800/80">
+                              <div className="text-sm font-black text-emerald-900 dark:text-emerald-200">
+                                {formatRupiah(item.shuPembulatan500)}
+                              </div>
+                              <div className="text-[9.5px] font-medium">
+                                {item.shuPembulatan500 !== item.totalSHU ? (
+                                  <span className={item.shuPembulatan500 > item.totalSHU ? "text-emerald-700 dark:text-emerald-400 font-semibold" : "text-amber-700 dark:text-amber-400 font-semibold"}>
+                                    {item.shuPembulatan500 > item.totalSHU ? '+' : ''}{item.shuPembulatan500 - item.totalSHU}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 text-[9px]">Pas (0)</span>
+                                )}
                               </div>
                             </td>
 
@@ -6874,7 +7973,13 @@ export function LaporanView({
                             <td className="p-3 text-center">
                               <button
                                 type="button"
-                                onClick={() => setActiveSlipMember(item)}
+                                onClick={() => setActiveSlipMember({ 
+                                  ...item, 
+                                  includeJasaPinjamanInJUA, 
+                                  includeWarungInJUA, 
+                                  includeSukarelaInJUA, 
+                                  includeProvisiInJUA 
+                                })}
                                 className="px-2.5 py-1.5 bg-white dark:bg-slate-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-700 rounded-lg text-xs font-bold transition flex items-center gap-1 mx-auto cursor-pointer shadow-2xs"
                                 title="Lihat dan cetak slip pembagian SHU anggota ini"
                               >
@@ -6905,8 +8010,13 @@ export function LaporanView({
                         <td className="p-3 text-right text-indigo-700 dark:text-indigo-400 bg-indigo-50/40 dark:bg-indigo-950/20">
                           {formatRupiah(shuPerAnggotaCalculations.totalJUADistributed)}
                         </td>
-                        <td className="p-3 text-right text-emerald-700 dark:text-emerald-300 bg-emerald-100/50 dark:bg-emerald-900/40 text-sm font-black">
-                          {formatRupiah(shuPerAnggotaCalculations.totalSHUDistributed)}
+                        <td className="p-3 text-right text-slate-700 dark:text-slate-300 bg-emerald-50/50 dark:bg-emerald-950/20 text-xs font-bold">
+                          <div>{formatRupiah(shuPerAnggotaCalculations.totalSHUDistributed)}</div>
+                          <div className="text-[9px] text-slate-400 font-normal">Perhitungan Murni</div>
+                        </td>
+                        <td className="p-3 text-right text-emerald-900 dark:text-emerald-100 bg-emerald-100/90 dark:bg-emerald-900/60 border-l border-emerald-300 dark:border-emerald-700 text-sm font-black">
+                          <div>{formatRupiah(shuPerAnggotaCalculations.totalSHUPembulatan500Distributed)}</div>
+                          <div className="text-[9px] text-emerald-700 dark:text-emerald-300 font-normal">Total Dibayarkan (Bulat 500)</div>
                         </td>
                         <td></td>
                       </tr>
@@ -6934,7 +8044,15 @@ export function LaporanView({
                     <div className="bg-white dark:bg-slate-850 p-3 rounded-lg border border-slate-200 dark:border-slate-750 space-y-1">
                       <p className="font-bold text-indigo-700 dark:text-indigo-400">2. Jasa Usaha Anggota (JUA)</p>
                       <p>
-                        Diberikan sebanding dengan transaksi ekonomi anggota (jasa bunga pinjaman lunas + perputaran belanja warung koperasi):
+                        Diberikan sebanding dengan transaksi ekonomi anggota (
+                        {[
+                          includeJasaPinjamanInJUA && 'jasa bunga pinjaman SP',
+                          includeWarungInJUA && 'perputaran belanja warung',
+                          includeSukarelaInJUA && 'simpanan sukarela',
+                          includeProvisiInJUA && 'provisi akad pinjaman'
+                        ].filter(Boolean).join(' + ') || 'tidak ada instrumen dipilih'}
+                        {!includeWarungInJUA && ', usaha warung dikecualikan'}
+                        ):
                       </p>
                       <p className="font-mono bg-slate-50 dark:bg-slate-900 p-1.5 rounded border text-[10px] text-slate-800 dark:text-slate-200">
                         JUA = (Partisipasi Usaha Anggota / Total Partisipasi Seluruh Anggota) × Pool JUA
@@ -7290,12 +8408,35 @@ export function LaporanView({
                       <div className="text-[11px] text-slate-600 dark:text-slate-400 grid grid-cols-2 gap-2 pt-1 border-t border-indigo-100 dark:border-indigo-900/40">
                         <div>
                           Jasa Pinjaman Disetor: <strong className="font-mono">{formatRupiah(activeSlipMember.jasaPinjamanDibayar)}</strong>
+                          <span className={`text-[9.5px] block font-semibold ${activeSlipMember.includeJasaPinjamanInJUA !== false ? 'text-indigo-600' : 'text-slate-400'}`}>
+                            {activeSlipMember.includeJasaPinjamanInJUA !== false ? '✓ Dihitung ke JUA' : '• Dikecualikan'}
+                          </span>
                         </div>
                         <div>
                           Transaksi Toko / Warung: <strong className="font-mono">{formatRupiah(activeSlipMember.belanjaWarung)}</strong>
+                          <span className={`text-[9.5px] block font-semibold ${activeSlipMember.includeWarungInJUA ? 'text-indigo-600' : 'text-slate-400'}`}>
+                            {activeSlipMember.includeWarungInJUA ? '✓ Dihitung ke JUA' : '• Dikecualikan (Hanya SP)'}
+                          </span>
                         </div>
-                        <div className="col-span-2">
-                          Porsi Partisipasi Usaha Koperasi: <strong className="font-mono">{activeSlipMember.porsiUsahaPct.toFixed(3)}%</strong>
+                        {activeSlipMember.includeSukarelaInJUA && (
+                          <div>
+                            Simpanan Sukarela: <strong className="font-mono">{formatRupiah(activeSlipMember.sSukarela)}</strong>
+                            <span className="text-[9.5px] text-indigo-600 block font-semibold">
+                              ✓ Dihitung ke JUA
+                            </span>
+                          </div>
+                        )}
+                        {activeSlipMember.includeProvisiInJUA && (
+                          <div>
+                            Provisi Akad Pinjaman: <strong className="font-mono">{formatRupiah(activeSlipMember.provisiDibayar || 0)}</strong>
+                            <span className="text-[9.5px] text-indigo-600 block font-semibold">
+                              ✓ Dihitung ke JUA
+                            </span>
+                          </div>
+                        )}
+                        <div className="col-span-2 pt-1 border-t border-dashed border-indigo-100 dark:border-indigo-900/40 flex justify-between items-center text-xs">
+                          <span>Total Partisipasi Usaha Dihitung: <strong className="font-mono text-indigo-700 dark:text-indigo-300">{formatRupiah(activeSlipMember.totalPartisipasiUsaha)}</strong></span>
+                          <span>Porsi Usaha: <strong className="font-mono">{activeSlipMember.porsiUsahaPct.toFixed(3)}%</strong></span>
                         </div>
                       </div>
                     </div>
@@ -7304,14 +8445,21 @@ export function LaporanView({
                   {/* Total SHU Diterima Highlight Card */}
                   <div className="p-5 bg-emerald-50 dark:bg-emerald-950/40 border-2 border-emerald-300 dark:border-emerald-700 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                     <div>
-                      <span className="text-[10px] uppercase font-bold text-emerald-700 dark:text-emerald-400 block">
-                        TOTAL SISA HASIL USAHA (SHU) DITERIMA
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] uppercase font-bold text-emerald-700 dark:text-emerald-400 block">
+                          TOTAL SHU DITERIMA (PEMBULATAN RP 500)
+                        </span>
+                        {activeSlipMember.shuPembulatan500 !== activeSlipMember.totalSHU && (
+                          <span className="text-[9.5px] font-mono px-2 py-0.5 rounded bg-emerald-200/80 dark:bg-emerald-800 text-emerald-900 dark:text-emerald-100 font-semibold">
+                            Murni: {formatRupiah(activeSlipMember.totalSHU)} ({activeSlipMember.shuPembulatan500 > activeSlipMember.totalSHU ? '+' : ''}{activeSlipMember.shuPembulatan500 - activeSlipMember.totalSHU})
+                          </span>
+                        )}
+                      </div>
                       <span className="text-2xl sm:text-3xl font-black font-mono text-emerald-800 dark:text-emerald-200">
-                        {formatRupiah(activeSlipMember.totalSHU)}
+                        {formatRupiah(activeSlipMember.shuPembulatan500)}
                       </span>
                       <p className="text-[11px] text-emerald-700 dark:text-emerald-400 italic mt-0.5 font-sans">
-                        Terbilang: {terbilang(activeSlipMember.totalSHU)} rupiah
+                        Terbilang: {terbilang(activeSlipMember.shuPembulatan500)} rupiah
                       </p>
                     </div>
                     <span className="px-3 py-1 bg-emerald-600 text-white font-bold rounded-lg text-xs font-mono self-start sm:self-auto">

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Member, KoperasiSetup, BebanKoperasi, Pinjaman, Simpanan, Pembelian,
-  PengurusPengawas, PengajuanPinjaman, PiutangWarung, Angsuran
+  PengurusPengawas, PengajuanPinjaman, PiutangWarung, Angsuran, SHUDistribution
 } from '../types';
 import { 
   formatRupiah, formatYearMonthIndo, INDO_MONTH_NAMES, exportToExcel 
@@ -9,11 +9,14 @@ import {
 import { 
   TrendingDown, Plus, Trash2, Search, Filter, Calendar, FileSpreadsheet, 
   Printer, ArrowUpRight, DollarSign, Wallet, ShoppingCart, UserMinus, 
-  CreditCard, CheckCircle2, AlertCircle, Info, Sparkles, Receipt, HandCoins
+  CreditCard, CheckCircle2, AlertCircle, Info, Sparkles, Receipt, HandCoins, Shield,
+  Coins, Award, ArrowRight, Boxes, QrCode
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import { PinjamanView } from './CoreViews';
+import { CameraBarcodeScannerModal } from './CameraBarcodeScannerModal';
+import { parseMemberScanCode } from '../utils/memberCard';
 
 export interface KasKeluarProps {
   setup: KoperasiSetup;
@@ -37,12 +40,15 @@ export interface KasKeluarProps {
   onAddPembelian?: (p: Omit<Pembelian, 'id'>) => void;
   onDeletePembelian?: (id: string) => void;
   availableCash?: number;
-  initialActiveTab?: 'beban' | 'pinjaman' | 'pencairan_pinjaman' | 'penarikan_simpanan' | 'pembelian' | 'rekap_bulanan';
+  initialActiveTab?: 'beban' | 'pinjaman' | 'pencairan_pinjaman' | 'penarikan_simpanan' | 'pembelian' | 'shu' | 'rekap_bulanan';
   initialLoanSearchTerm?: string;
   initialLoanAnggotaId?: string;
   initialLoanId?: string;
   onNavigateToAngsuran?: (angsuranId?: string, memberId?: string, query?: string) => void;
   isDarkMode?: boolean;
+  userRole?: 'admin' | 'pengawas' | 'karyawan_warung' | 'member' | null;
+  shuDistributions?: SHUDistribution[];
+  onAddSHUDistribution?: (dist: SHUDistribution) => Promise<void> | void;
 }
 
 export function KasKeluarView({
@@ -72,22 +78,37 @@ export function KasKeluarView({
   initialLoanAnggotaId,
   initialLoanId,
   onNavigateToAngsuran,
-  isDarkMode = false
+  isDarkMode = false,
+  userRole = 'admin',
+  shuDistributions = [],
+  onAddSHUDistribution
 }: KasKeluarProps) {
-  const [activeTab, setActiveTab] = useState<'beban' | 'pinjaman' | 'penarikan_simpanan' | 'pembelian' | 'rekap_bulanan'>(() => {
+  const isKasir = userRole === 'karyawan_warung';
+
+  const [activeTab, setActiveTab] = useState<'beban' | 'pinjaman' | 'penarikan_simpanan' | 'pembelian' | 'shu' | 'rekap_bulanan'>(() => {
+    if (isKasir) return 'beban';
     if (initialActiveTab === 'pencairan_pinjaman' || initialActiveTab === 'pinjaman') return 'pinjaman';
     return (initialActiveTab as any) || 'beban';
   });
 
+  // Strict role enforcement: kasir only has access to biaya beban
   useEffect(() => {
-    if (initialActiveTab) {
+    if (isKasir && activeTab !== 'beban') {
+      setActiveTab('beban');
+    }
+  }, [isKasir, activeTab]);
+
+  useEffect(() => {
+    if (isKasir) {
+      setActiveTab('beban');
+    } else if (initialActiveTab) {
       if (initialActiveTab === 'pencairan_pinjaman' || initialActiveTab === 'pinjaman') {
         setActiveTab('pinjaman');
       } else {
         setActiveTab(initialActiveTab as any);
       }
     }
-  }, [initialActiveTab]);
+  }, [initialActiveTab, isKasir]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>('semua');
 
@@ -102,6 +123,8 @@ export function KasKeluarView({
   const [tarikDate, setTarikDate] = useState(new Date().toISOString().substring(0, 10));
   const [tarikAmount, setTarikAmount] = useState('');
   const [tarikNotes, setTarikNotes] = useState('');
+  const [showMemberScannerModal, setShowMemberScannerModal] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState<string | null>(null);
 
   // Input State: Pembelian Barang / Inventaris
   const [pemDate, setPemDate] = useState(new Date().toISOString().substring(0, 10));
@@ -110,6 +133,17 @@ export function KasKeluarView({
   const [pemQty, setPemQty] = useState('1');
   const [pemHarga, setPemHarga] = useState('');
   const [pemNotes, setPemNotes] = useState('');
+
+  // Input State: Kas Keluar SHU (Pencairan / Distribusi SHU)
+  const [shuDate, setShuDate] = useState(new Date().toISOString().substring(0, 10));
+  const [shuRecipientType, setShuRecipientType] = useState<'anggota' | 'pengurus' | 'umum'>('anggota');
+  const [shuAnggotaId, setShuAnggotaId] = useState<string>('');
+  const [shuPengurusNama, setShuPengurusNama] = useState<string>('');
+  const [shuCategory, setShuCategory] = useState<'pencairan_anggota' | 'pencairan_pengurus' | 'pencairan_umum'>('pencairan_anggota');
+  const [shuAmount, setShuAmount] = useState<string>('');
+  const [shuNotes, setShuNotes] = useState<string>('');
+  const [shuSuccessMsg, setShuSuccessMsg] = useState<string>('');
+  const [shuErrorMsg, setShuErrorMsg] = useState<string>('');
 
   // Delete modal state
   const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; type: 'expense' | 'pembelian'; id: string; title: string }>({
@@ -137,16 +171,22 @@ export function KasKeluarView({
       id: string;
       sourceId: string;
       tanggal: string;
-      kategori: 'Beban Operasional' | 'Pencairan Pinjaman' | 'Penarikan Simpanan' | 'Pembelian Inventaris';
+      kategori: 'Beban Operasional' | 'Pencairan Pinjaman' | 'Penarikan Simpanan' | 'Pembelian Inventaris' | 'Pencairan SHU';
       subKategori: string;
       penerima: string;
       nominal: number;
       keterangan: string;
-      refType: 'expense' | 'pinjaman' | 'simpanan_tarik' | 'pembelian';
+      refType: 'expense' | 'pinjaman' | 'simpanan_tarik' | 'pembelian' | 'shu';
     }> = [];
 
-    // 1. Beban Operasional
-    expenses.forEach(e => {
+    const isSHUExpense = (e: BebanKoperasi) => {
+      const cat = (e.kategori || '').toLowerCase();
+      const ket = (e.keterangan || '').toLowerCase();
+      return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+    };
+
+    // 1. Beban Operasional Reguler
+    expenses.filter(e => !isSHUExpense(e)).forEach(e => {
       list.push({
         id: `out-exp-${e.id}`,
         sourceId: e.id,
@@ -207,6 +247,21 @@ export function KasKeluarView({
       });
     });
 
+    // 5. Kas Keluar SHU (Pencairan / Distribusi Hak SHU)
+    expenses.filter(e => isSHUExpense(e)).forEach(e => {
+      list.push({
+        id: `out-shu-${e.id}`,
+        sourceId: e.id,
+        tanggal: e.tanggal,
+        kategori: 'Pencairan SHU',
+        subKategori: 'Pencairan Hak SHU',
+        penerima: e.keterangan.includes('Anggota') ? 'Hak SHU Anggota' : e.keterangan.includes('Pengurus') ? 'Hak SHU Pengurus' : e.keterangan.includes('Pengawas') ? 'Hak SHU Pengawas' : 'Penerima SHU',
+        nominal: e.nominal,
+        keterangan: e.keterangan,
+        refType: 'shu'
+      });
+    });
+
     // Sort descending by date
     return list.sort((a, b) => new Date(b.tanggal).getTime() - new Date(a.tanggal).getTime());
   }, [expenses, pinjaman, simpanan, pembelian, members]);
@@ -242,6 +297,7 @@ export function KasKeluarView({
     let totalPinjaman = 0;
     let totalTarik = 0;
     let totalPembelian = 0;
+    let totalSHU = 0;
 
     filteredOutflows.forEach(item => {
       totalKasKeluar += item.nominal;
@@ -249,9 +305,10 @@ export function KasKeluarView({
       else if (item.kategori === 'Pencairan Pinjaman') totalPinjaman += item.nominal;
       else if (item.kategori === 'Penarikan Simpanan') totalTarik += item.nominal;
       else if (item.kategori === 'Pembelian Inventaris') totalPembelian += item.nominal;
+      else if (item.kategori === 'Pencairan SHU') totalSHU += item.nominal;
     });
 
-    return { totalKasKeluar, totalBeban, totalPinjaman, totalTarik, totalPembelian };
+    return { totalKasKeluar, totalBeban, totalPinjaman, totalTarik, totalPembelian, totalSHU };
   }, [filteredOutflows]);
 
   // Form Handlers
@@ -270,6 +327,47 @@ export function KasKeluarView({
     });
     setExpAmount('');
     setExpNotes('');
+  };
+
+  const handleAddSHUKasKeluar = (e: React.FormEvent) => {
+    e.preventDefault();
+    setShuErrorMsg('');
+    const nominalNum = parseFloat(shuAmount.replace(/\D/g, ''));
+    if (!nominalNum || nominalNum <= 0) {
+      setShuErrorMsg('Harap masukkan nominal pencairan SHU yang valid.');
+      return;
+    }
+
+    let penerimaLabel = 'Umum (Kolektif Anggota)';
+    if (shuRecipientType === 'anggota') {
+      const m = members.find(mem => mem.id === shuAnggotaId);
+      if (!m) {
+        setShuErrorMsg('Silakan pilih anggota penerima pencairan SHU.');
+        return;
+      }
+      penerimaLabel = `${m.nama} (${m.noAnggota})`;
+    } else if (shuRecipientType === 'pengurus') {
+      if (!shuPengurusNama.trim()) {
+        setShuErrorMsg('Silakan pilih atau masukkan nama pengurus/pengawas penerima SHU.');
+        return;
+      }
+      penerimaLabel = `${shuPengurusNama} (Pengurus/Pengawas)`;
+    }
+
+    const catatan = shuNotes.trim() ? ` - ${shuNotes.trim()}` : '';
+    const finalKeterangan = `Pencairan Kas SHU: ${penerimaLabel}${catatan}`;
+
+    onAddExpense({
+      tanggal: shuDate,
+      kategori: 'pencairan_shu',
+      nominal: nominalNum,
+      keterangan: finalKeterangan
+    });
+
+    setShuAmount('');
+    setShuNotes('');
+    setShuSuccessMsg(`Pencairan Kas SHU sebesar ${formatRupiah(nominalNum)} untuk ${penerimaLabel} berhasil dicatat! Transaksi ini secara otomatis memotong Kas Koperasi dan mengurangi akun SHU pada Neraca Saldo.`);
+    setTimeout(() => setShuSuccessMsg(''), 6000);
   };
 
   const handleTarikSimpananSubmit = (e: React.FormEvent) => {
@@ -361,11 +459,13 @@ export function KasKeluarView({
               <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
                 Kas Keluar
                 <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300">
-                  Semua Pengeluaran Kas
+                  {isKasir ? 'Biaya & Beban Operasional' : 'Semua Pengeluaran Kas'}
                 </span>
               </h1>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Pusat pencatatan seluruh pengeluaran kas: beban operasional, pencairan pinjaman, penarikan simpanan, dan pengadaan inventaris.
+                {isKasir
+                  ? 'Otorisasi kasir: pencatatan dan pengelolaan biaya beban operasional kas koperasi.'
+                  : 'Pusat pencatatan seluruh pengeluaran kas: beban operasional, pencairan pinjaman, penarikan simpanan, dan pengadaan inventaris.'}
               </p>
             </div>
           </div>
@@ -398,74 +498,104 @@ export function KasKeluarView({
           </span>
         </button>
 
-        <button
-          onClick={() => setActiveTab('pinjaman')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
-            activeTab === 'pinjaman'
-              ? 'bg-rose-600 text-white shadow-sm'
-              : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
-          }`}
-        >
-          <HandCoins className="w-4 h-4" />
-          <span>Akad Kredit & Pinjaman</span>
-          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
-            {pinjaman.length}
-          </span>
-          {pengajuanPinjaman.filter(p => p.status === 'Pending').length > 0 && (
-            <span className="bg-indigo-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[16px] text-center animate-pulse">
-              {pengajuanPinjaman.filter(p => p.status === 'Pending').length}
-            </span>
-          )}
-        </button>
+        {!isKasir && (
+          <>
+            <button
+              onClick={() => setActiveTab('pinjaman')}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                activeTab === 'pinjaman'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
+              }`}
+            >
+              <HandCoins className="w-4 h-4" />
+              <span>Akad Kredit & Pinjaman</span>
+              <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
+                {pinjaman.length}
+              </span>
+              {pengajuanPinjaman.filter(p => p.status === 'Pending').length > 0 && (
+                <span className="bg-indigo-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[16px] text-center animate-pulse">
+                  {pengajuanPinjaman.filter(p => p.status === 'Pending').length}
+                </span>
+              )}
+            </button>
 
-        <button
-          onClick={() => setActiveTab('penarikan_simpanan')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
-            activeTab === 'penarikan_simpanan'
-              ? 'bg-rose-600 text-white shadow-sm'
-              : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
-          }`}
-        >
-          <UserMinus className="w-4 h-4" />
-          <span>Penarikan Simpanan</span>
-          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
-            {simpanan.filter(s => s.jumlah < 0).length}
-          </span>
-        </button>
+            <button
+              onClick={() => setActiveTab('penarikan_simpanan')}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                activeTab === 'penarikan_simpanan'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
+              }`}
+            >
+              <UserMinus className="w-4 h-4" />
+              <span>Penarikan Simpanan</span>
+              <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
+                {simpanan.filter(s => s.jumlah < 0).length}
+              </span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('pembelian')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
-            activeTab === 'pembelian'
-              ? 'bg-rose-600 text-white shadow-sm'
-              : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
-          }`}
-        >
-          <ShoppingCart className="w-4 h-4" />
-          <span>Pembelian Inventaris</span>
-          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
-            {pembelian.length}
-          </span>
-        </button>
+            <button
+              onClick={() => setActiveTab('pembelian')}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                activeTab === 'pembelian'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
+              }`}
+            >
+              <ShoppingCart className="w-4 h-4" />
+              <span>Pembelian Inventaris</span>
+              <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
+                {pembelian.length}
+              </span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('rekap_bulanan')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
-            activeTab === 'rekap_bulanan'
-              ? 'bg-rose-600 text-white shadow-sm'
-              : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
-          }`}
-        >
-          <FileSpreadsheet className="w-4 h-4" />
-          <span>Rekap Bulanan Kas Keluar</span>
-          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
-            {allOutflows.length}
+            <button
+              onClick={() => setActiveTab('shu')}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                activeTab === 'shu'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
+              }`}
+            >
+              <Coins className="w-4 h-4" />
+              <span>Kas Keluar SHU</span>
+              <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
+                {expenses.filter(e => {
+                  const cat = (e.kategori || '').toLowerCase();
+                  const ket = (e.keterangan || '').toLowerCase();
+                  return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+                }).length}
+              </span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('rekap_bulanan')}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition cursor-pointer ${
+                activeTab === 'rekap_bulanan'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'
+              }`}
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Rekap Bulanan Kas Keluar</span>
+              <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-700/20 text-current">
+                {allOutflows.length}
+              </span>
+            </button>
+          </>
+        )}
+
+        {isKasir && (
+          <span className="text-[11px] font-semibold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 px-3 py-1.5 rounded-xl flex items-center gap-1.5 sm:ml-auto">
+            <Shield className="w-3.5 h-3.5 text-rose-500" />
+            <span>Otorisasi Kasir: Khusus Biaya Beban Operasional</span>
           </span>
-        </button>
+        )}
       </div>
 
       {/* TAB CONTENT: BIAYA & BEBAN OPERASIONAL */}
-      {activeTab === 'beban' && (
+      {(isKasir || activeTab === 'beban') && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Form Input Beban */}
           <div className="lg:col-span-1 bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm h-fit">
@@ -501,6 +631,9 @@ export function KasKeluarView({
                   <option value="transportasi">Transportasi & Perjalanan Dinas</option>
                   <option value="pajak_retribusi">Pajak, Iuran & Retribusi</option>
                   <option value="beban_lain">Beban Operasional Lain-lain</option>
+                  {!isKasir && (
+                    <option value="pencairan_shu">Pencairan / Kas Keluar SHU (Mengurangi SHU & Kas)</option>
+                  )}
                 </select>
               </div>
 
@@ -612,7 +745,7 @@ export function KasKeluarView({
       )}
 
       {/* TAB CONTENT: AKAD KREDIT & PINJAMAN */}
-      {activeTab === 'pinjaman' && (
+      {!isKasir && activeTab === 'pinjaman' && (
         <div className="space-y-4">
           <PinjamanView
             setup={setup}
@@ -638,7 +771,7 @@ export function KasKeluarView({
       )}
 
       {/* TAB CONTENT: PENARIKAN SIMPANAN SUKARELA */}
-      {activeTab === 'penarikan_simpanan' && (
+      {!isKasir && activeTab === 'penarikan_simpanan' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Form Tarik Simpanan */}
           <div className="lg:col-span-1 bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm h-fit">
@@ -649,12 +782,35 @@ export function KasKeluarView({
 
             <form onSubmit={handleTarikSimpananSubmit} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Pilih Anggota</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Pilih Anggota</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowMemberScannerModal(true)}
+                    className="px-2 py-0.5 text-[11px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 dark:text-rose-300 dark:hover:bg-rose-900 border border-rose-200 dark:border-rose-800 rounded-lg transition flex items-center gap-1 cursor-pointer active:scale-95 shadow-2xs"
+                    title="Scan QR Code / Barcode Kartu Anggota Digital via Kamera"
+                  >
+                    <QrCode className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+                    <span>Scan KTA</span>
+                  </button>
+                </div>
+
+                {scanFeedback && (
+                  <div className={`p-2 rounded-xl text-xs flex items-center gap-2 mb-2 ${
+                    scanFeedback.startsWith('✓') 
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                      : 'bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
+                  }`}>
+                    {scanFeedback.startsWith('✓') ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />}
+                    <span>{scanFeedback}</span>
+                  </div>
+                )}
+
                 <select
                   value={tarikAnggotaId}
                   onChange={(e) => setTarikAnggotaId(e.target.value)}
                   required
-                  className="w-full px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-rose-500"
+                  className="w-full px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-rose-500 font-semibold"
                 >
                   <option value="">-- Pilih Anggota Koperasi --</option>
                   {members.map(m => {
@@ -784,8 +940,36 @@ export function KasKeluarView({
       )}
 
       {/* TAB CONTENT: PEMBELIAN INVENTARIS */}
-      {activeTab === 'pembelian' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {!isKasir && activeTab === 'pembelian' && (
+        <div className="space-y-6">
+          {/* Title Header area matching Unit Usaha Warung */}
+          <div className="bg-gradient-to-r from-emerald-800 to-teal-950 text-white p-6 rounded-3xl border border-emerald-800 shadow-md">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <span className="p-3 bg-white/10 backdrop-blur-md rounded-2xl"><Boxes className="w-6 h-6 text-white"/></span>
+                <div>
+                  <h2 className="text-xl font-bold tracking-tight">Inventaris & Pengadaan Barang Koperasi</h2>
+                  <p className="text-xs text-emerald-100 mt-1">
+                    Kelola pengeluaran kas untuk perolehan aset inventaris, peralatan operasional kantor, serta persediaan modal koperasi.
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap sm:flex-nowrap gap-2 items-center">
+                <div className="bg-white/10 backdrop-blur-md px-3.5 py-2 rounded-xl text-center min-w-[100px]">
+                  <span className="text-[10px] text-emerald-200 block uppercase font-mono">Total Transaksi</span>
+                  <span className="text-sm font-bold font-mono">{pembelian.length} Item</span>
+                </div>
+                <div className="bg-white/10 backdrop-blur-md px-3.5 py-2 rounded-xl text-center min-w-[125px]">
+                  <span className="text-[10px] text-emerald-250 block uppercase font-mono">Total Nilai Aset</span>
+                  <span className="text-sm font-bold font-mono text-amber-200">
+                    {formatRupiah(pembelian.reduce((sum, p) => sum + p.totalHarga, 0))}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Form Input Pembelian */}
           <div className="lg:col-span-1 bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm h-fit">
             <div className="flex items-center gap-2 mb-4 pb-3 border-b border-slate-100 dark:border-slate-700">
@@ -943,10 +1127,360 @@ export function KasKeluarView({
             </div>
           </div>
         </div>
+        </div>
+      )}
+
+      {/* TAB CONTENT: KAS KELUAR SHU (PENCAIRAN / DISTRIBUSI SHU) */}
+      {!isKasir && activeTab === 'shu' && (
+        <div className="space-y-6">
+          {/* Header & Impact Info Banner */}
+          <div className="p-4 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 dark:from-emerald-950/40 dark:via-slate-900/50 dark:to-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-xs">
+            <div className="flex items-start sm:items-center gap-3">
+              <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-xs shrink-0">
+                <Coins className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs sm:text-sm font-bold text-emerald-950 dark:text-emerald-100">
+                    Kas Keluar SHU (Pencairan / Distribusi Sisa Hasil Usaha)
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 font-extrabold">
+                    Terintegrasi Neraca Saldo
+                  </span>
+                </div>
+                <p className="text-xs text-emerald-800 dark:text-emerald-300 mt-1">
+                  Pengeluaran kas untuk SHU (bagian anggota, pengurus, pengawas) secara langsung <strong>memotong saldo Kas Koperasi (Aktiva)</strong> dan <strong>mengurangi saldo SHU Berjalan pada Neraca Saldo (Pasiva)</strong>, sedangkan nilai <strong>Dana Cadangan</strong> pada Neraca Saldo menyesuaikan nominal alokasi distribusi SHU yang dibukukan.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Quick Summary Cards for SHU Outflows */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-emerald-200 dark:border-emerald-900/50 shadow-sm">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400 block mb-1">
+                Total Kas Keluar SHU Dicairkan
+              </span>
+              <div className="text-xl font-black text-emerald-700 dark:text-emerald-300 font-mono">
+                {formatRupiah(
+                  expenses.filter(e => {
+                    const cat = (e.kategori || '').toLowerCase();
+                    const ket = (e.keterangan || '').toLowerCase();
+                    return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+                  }).reduce((sum, e) => sum + e.nominal, 0)
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Mengurangi Kas & SHU Neraca Saldo</p>
+            </div>
+
+            <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
+                Kas Tersedia Koperasi
+              </span>
+              <div className={`text-lg font-extrabold font-mono ${availableCash >= 0 ? 'text-slate-800 dark:text-slate-100' : 'text-rose-600 dark:text-rose-400'}`}>
+                {formatRupiah(availableCash)}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Likuiditas riil kas koperasi</p>
+            </div>
+
+            <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 block mb-1">
+                Alokasi Dana Cadangan
+              </span>
+              <div className="text-lg font-extrabold text-indigo-700 dark:text-indigo-300 font-mono">
+                {formatRupiah(
+                  (setup?.danaCadanganAwal || 0) + 
+                  (shuDistributions || []).reduce((sum, d) => sum + (d.danaCadanganNominal || 0), 0)
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Menyesuaikan distribusi SHU</p>
+            </div>
+
+            <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
+                Total Transaksi SHU
+              </span>
+              <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100 font-mono">
+                {expenses.filter(e => {
+                  const cat = (e.kategori || '').toLowerCase();
+                  const ket = (e.keterangan || '').toLowerCase();
+                  return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+                }).length} Transaksi
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Pencairan anggota & pengurus</p>
+            </div>
+          </div>
+
+          {/* Form Input Kas Keluar SHU & Daftar Riwayat */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+            {/* Form Catat Kas Keluar SHU */}
+            <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm">
+              <div className="flex items-center gap-2 mb-4 pb-3 border-b border-slate-100 dark:border-slate-700">
+                <Plus className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <h2 className="font-bold text-sm text-slate-800 dark:text-slate-100">Catat Kas Keluar SHU</h2>
+              </div>
+
+              {shuSuccessMsg && (
+                <div className="mb-4 p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-xl text-xs text-emerald-800 dark:text-emerald-300 flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 mt-0.5" />
+                  <span>{shuSuccessMsg}</span>
+                </div>
+              )}
+
+              {shuErrorMsg && (
+                <div className="mb-4 p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-800 dark:text-rose-300 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
+                  <span>{shuErrorMsg}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleAddSHUKasKeluar} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Tanggal Transaksi</label>
+                  <input
+                    type="date"
+                    value={shuDate}
+                    onChange={(e) => setShuDate(e.target.value)}
+                    required
+                    className="w-full px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Target Penerima SHU</label>
+                  <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 dark:bg-slate-900/60 rounded-xl text-[11px] font-bold mb-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShuRecipientType('anggota');
+                        setShuCategory('pencairan_anggota');
+                      }}
+                      className={`py-1.5 rounded-lg transition cursor-pointer ${shuRecipientType === 'anggota' ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Anggota
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShuRecipientType('pengurus');
+                        setShuCategory('pencairan_pengurus');
+                      }}
+                      className={`py-1.5 rounded-lg transition cursor-pointer ${shuRecipientType === 'pengurus' ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Pengurus
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShuRecipientType('umum');
+                        setShuCategory('pencairan_umum');
+                      }}
+                      className={`py-1.5 rounded-lg transition cursor-pointer ${shuRecipientType === 'umum' ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Kolektif
+                    </button>
+                  </div>
+
+                  {shuRecipientType === 'anggota' && (
+                    <select
+                      value={shuAnggotaId}
+                      onChange={(e) => setShuAnggotaId(e.target.value)}
+                      required
+                      className="w-full px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+                    >
+                      <option value="">-- Pilih Anggota Koperasi --</option>
+                      {members.map(m => (
+                        <option key={m.id} value={m.id}>
+                          {m.nama} ({m.noAnggota})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  {shuRecipientType === 'pengurus' && (
+                    <select
+                      value={shuPengurusNama}
+                      onChange={(e) => setShuPengurusNama(e.target.value)}
+                      required
+                      className="w-full px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+                    >
+                      <option value="">-- Pilih Pengurus / Pengawas --</option>
+                      {pengurusPengawas && pengurusPengawas.length > 0 ? (
+                        pengurusPengawas.map(p => (
+                          <option key={p.id} value={p.nama}>
+                            {p.nama} ({p.jabatan || 'Pengurus/Pengawas'})
+                          </option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="Ketua Pengurus">Ketua Pengurus</option>
+                          <option value="Sekretaris Pengurus">Sekretaris Pengurus</option>
+                          <option value="Bendahara Pengurus">Bendahara Pengurus</option>
+                          <option value="Dewan Pengawas">Dewan Pengawas</option>
+                        </>
+                      )}
+                    </select>
+                  )}
+
+                  {shuRecipientType === 'umum' && (
+                    <div className="p-2.5 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 text-[11px] text-slate-500 dark:text-slate-400">
+                      Pencairan kolektif / kas keluar serentak SHU untuk seluruh anggota / stakeholder koperasi.
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Nominal Pencairan SHU (Rp)</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-2.5 text-xs font-bold text-slate-400">Rp</span>
+                    <input
+                      type="text"
+                      value={shuAmount}
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/\D/g, '');
+                        setShuAmount(raw ? parseInt(raw, 10).toLocaleString('id-ID') : '');
+                      }}
+                      placeholder="0"
+                      required
+                      className="w-full pl-9 pr-3 py-2 text-xs font-bold rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Keterangan / Keperluan</label>
+                  <textarea
+                    value={shuNotes}
+                    onChange={(e) => setShuNotes(e.target.value)}
+                    placeholder="Contoh: Pencairan SHU Tahun Buku berjalan bagian anggota..."
+                    rows={3}
+                    className="w-full px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div className="p-3 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800/60 rounded-xl text-[11px] text-emerald-800 dark:text-emerald-300 space-y-1">
+                  <div className="font-bold flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5 text-emerald-600" />
+                    Efek Otomatis Pembukuan Akuntansi:
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5 text-[10px]">
+                    <li><strong>Kas Koperasi:</strong> Berkurang sebesar nominal pencairan</li>
+                    <li><strong>SHU Neraca Saldo:</strong> Berkurang sebesar nominal pencairan</li>
+                    <li><strong>Dana Cadangan:</strong> Tetap terjaga & sinkron dengan alokasi distribusi</li>
+                  </ul>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition shadow-sm cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <CheckCircle2 className="w-4 h-4" /> Simpan Kas Keluar SHU
+                </button>
+              </form>
+            </div>
+
+            {/* List Kas Keluar SHU Terkini */}
+            <div className="lg:col-span-2 bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100 dark:border-slate-700">
+                <div>
+                  <h2 className="font-bold text-sm text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                    <Coins className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    Daftar Kas Keluar & Pencairan SHU
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Total {expenses.filter(e => {
+                      const cat = (e.kategori || '').toLowerCase();
+                      const ket = (e.keterangan || '').toLowerCase();
+                      return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+                    }).length} transaksi pencairan SHU
+                  </p>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 block">Total SHU Dicairkan</span>
+                  <span className="text-base font-extrabold text-emerald-600 dark:text-emerald-400 font-mono">
+                    {formatRupiah(
+                      expenses.filter(e => {
+                        const cat = (e.kategori || '').toLowerCase();
+                        const ket = (e.keterangan || '').toLowerCase();
+                        return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+                      }).reduce((sum, e) => sum + e.nominal, 0)
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              {/* Table List SHU Outflows */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-100 dark:border-slate-700 text-slate-400 text-[11px] uppercase tracking-wider font-semibold">
+                      <th className="py-2.5 px-3">Tanggal</th>
+                      <th className="py-2.5 px-3">Klasifikasi</th>
+                      <th className="py-2.5 px-3">Keterangan / Penerima</th>
+                      <th className="py-2.5 px-3 text-right">Nominal (Rp)</th>
+                      <th className="py-2.5 px-3 text-center">Dampak Neraca</th>
+                      <th className="py-2.5 px-3 text-center">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700/50">
+                    {expenses.filter(e => {
+                      const cat = (e.kategori || '').toLowerCase();
+                      const ket = (e.keterangan || '').toLowerCase();
+                      return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+                    }).length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-8 text-center text-slate-400">
+                          Belum ada transaksi pengeluaran kas / pencairan SHU yang dicatat.
+                        </td>
+                      </tr>
+                    ) : (
+                      expenses.filter(e => {
+                        const cat = (e.kategori || '').toLowerCase();
+                        const ket = (e.keterangan || '').toLowerCase();
+                        return cat === 'pencairan_shu' || cat === 'shu' || cat === 'distribusi_shu' || cat.includes('shu') || ket.includes('pembagian shu') || ket.includes('pencairan shu') || ket.includes('bagian anggota') || ket.includes('bagian pengurus') || ket.includes('bagian pengawas');
+                      }).map((e) => (
+                        <tr key={e.id} className="hover:bg-slate-50 dark:hover:bg-slate-750/50 transition">
+                          <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">{e.tanggal}</td>
+                          <td className="py-2.5 px-3">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                              Kas Keluar SHU
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="font-semibold text-slate-800 dark:text-slate-200 block">{e.keterangan}</span>
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-extrabold text-emerald-600 dark:text-emerald-400 font-mono whitespace-nowrap">
+                            {formatRupiah(e.nominal)}
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-mono whitespace-nowrap">
+                              Kas (-) & SHU (-)
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            {onDeleteExpense && (
+                              <button
+                                onClick={() => setDeleteModal({ isOpen: true, type: 'expense', id: e.id, title: `Pencairan SHU senilai ${formatRupiah(e.nominal)}` })}
+                                className="p-1 hover:bg-rose-50 dark:hover:bg-rose-950/50 text-slate-400 hover:text-rose-600 rounded transition cursor-pointer"
+                                title="Hapus transaksi kas keluar SHU"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* TAB CONTENT: REKAP BULANAN KAS KELUAR */}
-      {activeTab === 'rekap_bulanan' && (
+      {!isKasir && activeTab === 'rekap_bulanan' && (
         <div className="space-y-6">
           {/* Filter Bar & Quick Stats */}
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
@@ -996,13 +1530,13 @@ export function KasKeluarView({
             </div>
           </div>
 
-          {/* 4 Summary Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* 5 Summary Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
             <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-rose-200 dark:border-rose-900/50 shadow-sm relative overflow-hidden">
               <span className="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400 block mb-1">
                 Total Kas Keluar {selectedMonthFilter !== 'semua' ? `(${formatYearMonthIndo(selectedMonthFilter)})` : ''}
               </span>
-              <div className="text-xl font-black text-rose-700 dark:text-rose-400">
+              <div className="text-xl font-black text-rose-700 dark:text-rose-400 font-mono">
                 {formatRupiah(monthlyStats.totalKasKeluar)}
               </div>
               <p className="text-[11px] text-slate-400 mt-1">{filteredOutflows.length} transaksi tercatat</p>
@@ -1012,7 +1546,7 @@ export function KasKeluarView({
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
                 Biaya Operasional
               </span>
-              <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100">
+              <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100 font-mono">
                 {formatRupiah(monthlyStats.totalBeban)}
               </div>
               <p className="text-[11px] text-slate-400 mt-1">Listrik, ATK, honor, dll</p>
@@ -1022,17 +1556,27 @@ export function KasKeluarView({
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
                 Pencairan Pinjaman
               </span>
-              <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100">
+              <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100 font-mono">
                 {formatRupiah(monthlyStats.totalPinjaman)}
               </div>
               <p className="text-[11px] text-slate-400 mt-1">Modal kredit disalurkan</p>
+            </div>
+
+            <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-emerald-200 dark:border-emerald-900/50 shadow-sm">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400 block mb-1">
+                Kas Keluar SHU
+              </span>
+              <div className="text-lg font-extrabold text-emerald-700 dark:text-emerald-300 font-mono">
+                {formatRupiah(monthlyStats.totalSHU)}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Pencairan SHU Anggota/Pengurus</p>
             </div>
 
             <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm">
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
                 Tarik Simpanan & Pembelian
               </span>
-              <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100">
+              <div className="text-lg font-extrabold text-slate-800 dark:text-slate-100 font-mono">
                 {formatRupiah(monthlyStats.totalTarik + monthlyStats.totalPembelian)}
               </div>
               <p className="text-[11px] text-slate-400 mt-1">Tarik: {formatRupiah(monthlyStats.totalTarik)} | Aset: {formatRupiah(monthlyStats.totalPembelian)}</p>
@@ -1084,6 +1628,8 @@ export function KasKeluarView({
                                 ? 'bg-rose-100 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300'
                                 : item.kategori === 'Penarikan Simpanan'
                                 ? 'bg-purple-100 dark:bg-purple-950/70 text-purple-700 dark:text-purple-300'
+                                : item.kategori === 'Pencairan SHU'
+                                ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
                                 : 'bg-blue-100 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300'
                             }`}>
                               {item.kategori}
@@ -1128,6 +1674,26 @@ export function KasKeluarView({
           onClose={() => setDeleteModal({ isOpen: false, type: 'expense', id: '', title: '' })}
         />
       )}
+
+      {/* SCANNER MODAL: Camera Barcode Scanner Kartu Anggota Tarik Simpanan */}
+      <CameraBarcodeScannerModal
+        isOpen={showMemberScannerModal}
+        onClose={() => setShowMemberScannerModal(false)}
+        title="Scan Kartu Anggota (Tarik Simpanan Sukarela)"
+        subtitle="Arahkan kamera ke QR Code atau Barcode pada kartu anggota di layar HP atau kartu fisik"
+        onScan={(scannedCode) => {
+          const mem = parseMemberScanCode(scannedCode, members);
+          if (mem) {
+            setTarikAnggotaId(mem.id);
+            setScanFeedback(`✓ Kartu Anggota Terdeteksi: ${mem.nama} (${mem.noAnggota})`);
+            setTimeout(() => setScanFeedback(null), 3500);
+            setShowMemberScannerModal(false);
+          } else {
+            setScanFeedback(`⚠️ Kode "${scannedCode}" bukan kode anggota terdaftar.`);
+            setTimeout(() => setScanFeedback(null), 3500);
+          }
+        }}
+      />
     </div>
   );
 }

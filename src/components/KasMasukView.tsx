@@ -1,13 +1,15 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Member, Simpanan, Pinjaman, Angsuran, ManasukaBungaLog, KoperasiSetup, PembayaranPending, PendapatanLain } from '../types';
-import { formatRupiah, terbilang, getTransactionTime, sortMembersNaturally, createWhatsAppThankYouUrl, calculateMemberLedgerResume, calculateAngsuranPrincipal, calculateAngsuranInterest, calculateLoanOutstanding, calculateHistoricalLoanOutstanding, formatYearMonthIndo, exportToExcel } from '../utils/finance';
+import { formatRupiah, terbilang, getTransactionTime, sortMembersNaturally, createWhatsAppThankYouUrl, calculateMemberLedgerResume, calculateAngsuranPrincipal, calculateAngsuranInterest, calculateLoanOutstanding, calculateHistoricalLoanOutstanding, formatYearMonthIndo, exportToExcel, INDO_MONTH_NAMES, isSimpananMatchingMonth, getMemberWajibMonthStatus, getEarliestUnpaidWajibMonth } from '../utils/finance';
 import { 
   Users, Wallet, HandCoins, Calendar, CheckCircle2, AlertCircle, AlertTriangle, Phone, ArrowUpRight, Receipt, X,
   Printer, Info, FileText, Trash2, Pencil, Search, MessageSquare, Maximize2, Minimize2, Columns, LayoutGrid, Bell,
-  ArrowUpDown, TrendingUp, DollarSign, Plus, FileSpreadsheet, Tag
+  ArrowUpDown, TrendingUp, DollarSign, Plus, FileSpreadsheet, Tag, ChevronRight, Check, Shield
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
+import { KalenderSimpananWajib } from './KalenderSimpananWajib';
+import { KalenderAngsuranPinjaman, validateChronologicalInstallments } from './KalenderAngsuranPinjaman';
 
 interface KasMasukProps {
   setup: KoperasiSetup;
@@ -29,11 +31,12 @@ interface KasMasukProps {
   onEditSimpanan?: (updated: Simpanan) => void;
   onEditAngsuran?: (updated: Angsuran) => void;
   availableCash?: number;
-  initialActiveTab?: 'simpanan' | 'angsuran' | 'pendapatan' | 'rekap_bulanan' | 'pembayaran_pending';
+  initialActiveTab?: 'simpanan' | 'angsuran' | 'pendapatan' | 'rekap_bulanan' | 'rekap_wajib' | 'pembayaran_pending';
   initialSearchTerm?: string;
   initialAnggotaId?: string;
   onNavigateToPinjaman?: (pinjamanId?: string, memberId?: string, query?: string) => void;
   isDarkMode?: boolean;
+  userRole?: 'admin' | 'pengawas' | 'karyawan_warung' | 'member' | null;
 }
 
 export function KasMasukView({
@@ -60,8 +63,10 @@ export function KasMasukView({
   initialSearchTerm,
   initialAnggotaId,
   onNavigateToPinjaman,
-  isDarkMode = false
+  isDarkMode = false,
+  userRole = 'admin'
 }: KasMasukProps) {
+  const isKasir = userRole === 'karyawan_warung';
   const sortedMembers = useMemo(() => sortMembersNaturally(members), [members]);
   // Form states
   const [anggotaId, setAnggotaId] = useState('');
@@ -74,6 +79,8 @@ export function KasMasukView({
   const [editJenis, setEditJenis] = useState<'Pokok' | 'Wajib' | 'Sukarela'>('Sukarela');
   const [editJumlah, setEditJumlah] = useState('');
   const [editKeterangan, setEditKeterangan] = useState('');
+  const [editPeriodeBulan, setEditPeriodeBulan] = useState('');
+  const [editBulan, setEditBulan] = useState('');
   const [editIsPenarikan, setEditIsPenarikan] = useState(false);
   const [deleteModalState, setDeleteModalState] = useState<{
     isOpen: boolean;
@@ -93,6 +100,9 @@ export function KasMasukView({
     setEditIsPenarikan(isNeg);
     setEditJumlah(formatInputRupiah(String(Math.abs(s.jumlah))));
     setEditKeterangan(s.keterangan || '');
+    const defYM = s.periodeBulan || (s.tanggal ? s.tanggal.substring(0, 7) : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`);
+    setEditPeriodeBulan(defYM);
+    setEditBulan(s.bulan || formatYearMonthIndo(defYM));
   };
 
   const handleSaveEditSimpanan = (e: React.FormEvent) => {
@@ -115,6 +125,8 @@ export function KasMasukView({
       jenis: editJenis,
       jumlah: finalJumlah,
       keterangan: editKeterangan,
+      periodeBulan: editJenis === 'Wajib' ? editPeriodeBulan : editingSimpanan.periodeBulan,
+      bulan: editJenis === 'Wajib' ? (editBulan || formatYearMonthIndo(editPeriodeBulan)) : editingSimpanan.bulan,
     };
 
     onEditSimpanan(updated);
@@ -172,10 +184,35 @@ export function KasMasukView({
   };
   
   // Savings states
+  const currentRunningMonthYM = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
+  const [periodeBulanWajib, setPeriodeBulanWajib] = useState(currentRunningMonthYM);
+  const [selectedMonthsWajib, setSelectedMonthsWajib] = useState<string[]>([currentRunningMonthYM]);
+  const [paidMonthWarning, setPaidMonthWarning] = useState<string | null>(null);
   const [jumlahPokok, setJumlahPokok] = useState('50.000');
   const [jumlahWajib, setJumlahWajib] = useState('50.000');
   const [jumlahSukarela, setJumlahSukarela] = useState('');
   const [keteranganSimpanan, setKeteranganSimpanan] = useState('');
+
+  // Handler for multi-month selection in Simpanan Wajib (nominal automatically adjusts: months.length * 50.000)
+  // ATURAN KETAT: Bulan yang sudah dibayar (LUNAS) TIDAK BISA DIPILIH
+  const handleSelectMonthsWajib = (months: string[]) => {
+    const nomWajib = setup?.nominalSimpananWajib || 50000;
+    const unpaidMonths = anggotaId 
+      ? months.filter(ym => !getMemberWajibMonthStatus(anggotaId, simpanan, ym, nomWajib).isPaid)
+      : months;
+
+    setSelectedMonthsWajib(unpaidMonths);
+    if (unpaidMonths.length > 0) {
+      setPeriodeBulanWajib(unpaidMonths[0]);
+      setJumlahWajib(formatInputRupiah(String(unpaidMonths.length * nomWajib)));
+    } else {
+      setPeriodeBulanWajib('');
+      setJumlahWajib('0');
+    }
+  };
   
   // Installment states
   const [angsuranPokok, setAngsuranPokok] = useState('');
@@ -237,7 +274,13 @@ export function KasMasukView({
   const [previewReceipt, setPreviewReceipt] = useState<Angsuran | null>(null);
 
   // Filters and table switches
-  const [activeTab, setActiveTab] = useState<'simpanan' | 'angsuran' | 'pendapatan' | 'rekap_bulanan' | 'pembayaran_pending'>(initialActiveTab || 'simpanan');
+  const [activeTab, setActiveTab] = useState<'simpanan' | 'angsuran' | 'pendapatan' | 'rekap_bulanan' | 'rekap_wajib' | 'pembayaran_pending'>(() => {
+    if (isKasir) return 'pendapatan';
+    return initialActiveTab || 'simpanan';
+  });
+  const [rekapWajibMonth, setRekapWajibMonth] = useState<string>(currentRunningMonthYM);
+  const [rekapWajibStatusFilter, setRekapWajibStatusFilter] = useState<'belum_bayar' | 'sudah_bayar' | 'semua'>('belum_bayar');
+  const [rekapWajibSearch, setRekapWajibSearch] = useState('');
   const [isTableFullScreen, setIsTableFullScreen] = useState(false);
   const [filterAnggotaOpt, setFilterAnggotaOpt] = useState(initialAnggotaId || '');
   const [filterJenisOpt, setFilterJenisOpt] = useState('');
@@ -249,6 +292,60 @@ export function KasMasukView({
   const [validationComments, setValidationComments] = useState<Record<string, string>>({});
   const [pendingStatusFilter, setPendingStatusFilter] = useState<'Semua' | 'Pending' | 'Disetujui' | 'Ditolak'>('Semua');
   const [previewBuktiModal, setPreviewBuktiModal] = useState<{ url: string; title: string } | null>(null);
+  const [calendarModalMember, setCalendarModalMember] = useState<Member | null>(null);
+
+  // Rekap Wajib calculations
+  const expectedNominalWajib = setup?.nominalSimpananWajib || 50000;
+
+  const rekapWajibData = useMemo(() => {
+    const rows = sortedMembers.map(m => {
+      const status = getMemberWajibMonthStatus(m, simpanan, rekapWajibMonth, expectedNominalWajib);
+      return {
+        member: m,
+        ...status
+      };
+    });
+
+    const totalMembers = rows.length;
+    const paidRows = rows.filter(r => r.isPaid);
+    const unpaidRows = rows.filter(r => !r.isPaid);
+    const paidCount = paidRows.length;
+    const unpaidCount = unpaidRows.length;
+    const totalCollected = paidRows.reduce((acc, curr) => acc + curr.totalPaid, 0);
+    const totalUnpaidNominal = unpaidCount * expectedNominalWajib;
+    const kepatuhanPercent = totalMembers > 0 ? Math.round((paidCount / totalMembers) * 100) : 0;
+
+    return {
+      rows,
+      totalMembers,
+      paidCount,
+      unpaidCount,
+      totalCollected,
+      totalUnpaidNominal,
+      kepatuhanPercent
+    };
+  }, [sortedMembers, simpanan, rekapWajibMonth, expectedNominalWajib]);
+
+  const filteredRekapWajibRows = useMemo(() => {
+    let list = rekapWajibData.rows;
+    if (rekapWajibStatusFilter === 'belum_bayar') {
+      list = list.filter(r => !r.isPaid);
+    } else if (rekapWajibStatusFilter === 'sudah_bayar') {
+      list = list.filter(r => r.isPaid);
+    }
+
+    if (rekapWajibSearch.trim()) {
+      const q = rekapWajibSearch.toLowerCase().trim();
+      list = list.filter(r => 
+        r.member.nama.toLowerCase().includes(q) ||
+        r.member.noAnggota.toLowerCase().includes(q) ||
+        (r.member.noHp && r.member.noHp.includes(q)) ||
+        (r.member.pekerjaan && r.member.pekerjaan.toLowerCase().includes(q))
+      );
+    }
+
+    return list;
+  }, [rekapWajibData.rows, rekapWajibStatusFilter, rekapWajibSearch]);
 
   // Income form states
   const [incTanggal, setIncTanggal] = useState(new Date().toISOString().substring(0, 10));
@@ -299,7 +396,31 @@ export function KasMasukView({
     return parseFloat(clean) || 0;
   };
 
-  const [formMode, setFormMode] = useState<'kas_masuk' | 'pendapatan'>('kas_masuk');
+  const [formMode, setFormMode] = useState<'kas_masuk' | 'pendapatan'>(() => {
+    if (isKasir) return 'pendapatan';
+    return 'kas_masuk';
+  });
+
+  // Strict role enforcement: kasir cannot access setoran anggota, only pendapatan kas
+  useEffect(() => {
+    if (isKasir) {
+      if (formMode !== 'pendapatan') {
+        setFormMode('pendapatan');
+      }
+      if (activeTab !== 'pendapatan') {
+        setActiveTab('pendapatan');
+      }
+    }
+  }, [isKasir, formMode, activeTab]);
+
+  useEffect(() => {
+    if (isKasir) {
+      setActiveTab('pendapatan');
+      setFormMode('pendapatan');
+    } else if (initialActiveTab) {
+      setActiveTab(initialActiveTab);
+    }
+  }, [initialActiveTab, isKasir]);
 
   // Handler for adding income in Kas Masuk
   const handleIncomeSubmit = (e: React.FormEvent) => {
@@ -620,6 +741,7 @@ export function KasMasukView({
   // Toggle to optionally include installment when active loan exists
   const [includeInstallment, setIncludeInstallment] = useState(true);
   const [payOption, setPayOption] = useState<'rutin' | 'dua_bulan' | 'lunas'>('rutin');
+  const [selectedInstallments, setSelectedInstallments] = useState<number[]>([]);
 
   // Calculate voluntary savings balance for selected member
   const selectedMemberSukarelaBalance = useMemo(() => {
@@ -655,6 +777,7 @@ export function KasMasukView({
       setAngsuranJasa('');
       setCustomAmount('');
       setNotes('');
+      setSelectedInstallments([]);
       return;
     }
 
@@ -663,56 +786,159 @@ export function KasMasukView({
     } else {
       setJumlahPokok('50.000');
     }
-    setJumlahWajib('50.000');
+    const nomWajib = setup?.nominalSimpananWajib || 50000;
+    // Cari bulan pertama yang BELUM DIBAYAR agar bulan lunas tidak terpilih otomatis
+    const earliestUnpaid = getEarliestUnpaidWajibMonth(anggotaId, simpanan, nomWajib);
+    setSelectedMonthsWajib([earliestUnpaid]);
+    setPeriodeBulanWajib(earliestUnpaid);
+    setJumlahWajib(formatInputRupiah(String(nomWajib)));
     setJumlahSukarela('');
     setCustomAmount('');
     setNotes('');
     setIncludeInstallment(true);
   }, [anggotaId, hasPokokPaid]);
 
-  // Set default angsuran pokok & jasa (default jasa pinjaman 1.5% dari total pinjaman)
-  React.useEffect(() => {
-    if (activeLoanContract) {
-      const nomPinjaman = activeLoanContract.contract.nominalPinjaman || 0;
-      // Default jasa 1.5% dari total pinjaman
-      const defJasa = Math.round(nomPinjaman * 0.015);
+  // Handler pemilihan multi-bulan angsuran (seperti simpanan wajib)
+  const handleSelectInstallments = (installments: number[]) => {
+    if (!activeLoanContract) return;
 
-      if (payOption === 'lunas') {
+    const tenor = activeLoanContract.contract.tenor || 10;
+    const related = activeLoanContract.relatedPayments || [];
+
+    // Filter ketat: angsuran yang sudah lunas TIDAK BISA DIPILIH
+    const filteredInstallments = installments.filter(k => {
+      if (k < 1 || k > tenor) return false;
+      const isPaid = related.some(a => a.bulanKe === k) || (related.filter(a => !a.bulanKe).length >= k);
+      return !isPaid;
+    }).sort((a, b) => a - b);
+
+    // Ambil daftar seluruh angsuran yang belum lunas
+    const allUnpaid: number[] = [];
+    for (let k = 1; k <= tenor; k++) {
+      const isPaid = related.some(a => a.bulanKe === k) || (related.filter(a => !a.bulanKe).length >= k);
+      if (!isPaid) allUnpaid.push(k);
+    }
+
+    // Validasi pemilihan harus berurutan secara kronologis sesuai sisa tenor pinjaman
+    const chronoValidation = validateChronologicalInstallments(filteredInstallments, allUnpaid);
+    const validInstallments = chronoValidation.isValid
+      ? filteredInstallments
+      : (chronoValidation.expectedSequence || (allUnpaid.length > 0 ? [allUnpaid[0]] : []));
+
+    setSelectedInstallments(validInstallments);
+
+    const nomPinjaman = activeLoanContract.contract.nominalPinjaman || 0;
+    const regPokok = activeLoanContract.contract.angsuranPokokPerBulan || Math.round(nomPinjaman / (tenor || 1));
+    const regJasa = activeLoanContract.jasaBulanBerjalan > 0 
+      ? activeLoanContract.jasaBulanBerjalan 
+      : Math.round(nomPinjaman * 0.015);
+
+    if (validInstallments.length > 0) {
+      setBulanKe(validInstallments[0]);
+
+      const isAllUnpaidSelected = validInstallments.length === allUnpaid.length && allUnpaid.length > 0;
+
+      if (isAllUnpaidSelected) {
+        setPayOption('lunas');
         setAngsuranPokok(formatInputRupiah(String(activeLoanContract.sisaPokok)));
-        setAngsuranJasa(formatInputRupiah(String(defJasa)));
-        setNotes('Pelunasan Lunas Pinjaman (Sisa Pokok + Jasa Bulan Berjalan)');
-      } else if (payOption === 'dua_bulan') {
-        const defPokok = activeLoanContract.contract.angsuranPokokPerBulan || Math.round(nomPinjaman / (activeLoanContract.contract.tenor || 1));
-        const twoPokok = Math.min(activeLoanContract.sisaPokok, defPokok * 2);
-        const twoJasa = defJasa * 2;
+        setAngsuranJasa(formatInputRupiah(String(validInstallments.length * regJasa)));
+        setNotes(`Pelunasan Lunas Pinjaman (Sisa Pokok + ${validInstallments.length}x Jasa)`);
+      } else if (validInstallments.length === 2) {
+        setPayOption('dua_bulan');
+        const twoPokok = Math.min(activeLoanContract.sisaPokok, regPokok * 2);
         setAngsuranPokok(formatInputRupiah(String(twoPokok)));
-        setAngsuranJasa(formatInputRupiah(String(twoJasa)));
-        setNotes(`Bayar 2 Bulan Sekaligus (Bulan Ke-${bulanKe} Tunggakan & Bulan Ke-${bulanKe + 1} Berjalan)`);
+        setAngsuranJasa(formatInputRupiah(String(regJasa * 2)));
+        setNotes(`Bayar 2 Bulan Sekaligus (Angsuran Ke-${validInstallments[0]} & Ke-${validInstallments[1]})`);
       } else {
-        const defPokok = activeLoanContract.contract.angsuranPokokPerBulan || Math.round(nomPinjaman / (activeLoanContract.contract.tenor || 1));
-        setAngsuranPokok(formatInputRupiah(String(defPokok)));
-        setAngsuranJasa(formatInputRupiah(String(defJasa)));
+        setPayOption('rutin');
+        const totalPokok = Math.min(activeLoanContract.sisaPokok, regPokok * validInstallments.length);
+        setAngsuranPokok(formatInputRupiah(String(totalPokok)));
+        setAngsuranJasa(formatInputRupiah(String(regJasa * validInstallments.length)));
+        if (validInstallments.length > 1) {
+          setNotes(`Bayar ${validInstallments.length} Bulan Angsuran (Ke-${validInstallments.join(', ')})`);
+        } else {
+          setNotes(`Pembayaran angsuran ke-${validInstallments[0]}`);
+        }
       }
     } else {
+      setAngsuranPokok('0');
+      setAngsuranJasa('0');
+      setPayOption('rutin');
+      setNotes('');
+    }
+  };
+
+  // Otomatis tentukan angsuran pertama yang belum lunas saat kontrak pinjaman aktif berubah
+  React.useEffect(() => {
+    if (activeLoanContract) {
+      const tenor = activeLoanContract.contract.tenor || 10;
+      const related = activeLoanContract.relatedPayments || [];
+      let firstUnpaid: number | null = null;
+      for (let k = 1; k <= tenor; k++) {
+        const isPaid = related.some(a => a.bulanKe === k) || (related.filter(a => !a.bulanKe).length >= k);
+        if (!isPaid) {
+          firstUnpaid = k;
+          break;
+        }
+      }
+
+      if (firstUnpaid !== null) {
+        handleSelectInstallments([firstUnpaid]);
+      } else {
+        setSelectedInstallments([]);
+        setAngsuranPokok('0');
+        setAngsuranJasa('0');
+      }
+    } else {
+      setSelectedInstallments([]);
       setAngsuranPokok('');
       setAngsuranJasa('');
     }
-  }, [activeLoanContract?.contract.id, payOption]);
+  }, [activeLoanContract?.contract.id]);
 
-  // Set automatic installment bulanKe based on previous logs
-  React.useEffect(() => {
-    if (activeLoanContract) {
-      const related = activeLoanContract.relatedPayments;
-      if (related && related.length > 0) {
-        const maxBulan = Math.max(...related.map(a => a.bulanKe || 0));
-        setBulanKe(maxBulan + 1);
-      } else {
-        setBulanKe(1);
-      }
-    } else {
-      setBulanKe(1);
-    }
-  }, [activeLoanContract]);
+  // Data grid tombol angsuran dari Ke-1 s.d. Ke-N
+  const installmentGridData = useMemo(() => {
+    if (!activeLoanContract) return { items: [], unpaidList: [], paidCount: 0, unpaidCount: 0, regPokok: 0, regJasa: 0 };
+    const tenor = activeLoanContract.contract.tenor || 10;
+    const related = activeLoanContract.relatedPayments || [];
+    const nomPinjaman = activeLoanContract.contract.nominalPinjaman || 0;
+    const regPokok = activeLoanContract.contract.angsuranPokokPerBulan || Math.round(nomPinjaman / (tenor || 1));
+    const regJasa = activeLoanContract.jasaBulanBerjalan > 0 
+      ? activeLoanContract.jasaBulanBerjalan 
+      : Math.round(nomPinjaman * 0.015);
+
+    const items = Array.from({ length: tenor }, (_, i) => {
+      const bKe = i + 1;
+      const payment = related.find(a => a.bulanKe === bKe);
+      const isPaid = Boolean(payment) || (related.filter(a => !a.bulanKe).length >= bKe);
+      const isSelected = !isPaid && selectedInstallments.includes(bKe);
+      const selectedIndex = isSelected ? selectedInstallments.indexOf(bKe) + 1 : 0;
+
+      return {
+        bulanKe: bKe,
+        isPaid,
+        paidAmount: payment?.jumlahBayar,
+        isSelected,
+        selectedIndex,
+        nominalPokok: regPokok,
+        nominalJasa: regJasa,
+        totalNominal: regPokok + regJasa
+      };
+    });
+
+    const unpaidList = items.filter(it => !it.isPaid).map(it => it.bulanKe);
+    const paidCount = items.filter(it => it.isPaid).length;
+    const unpaidCount = unpaidList.length;
+
+    return {
+      items,
+      unpaidList,
+      paidCount,
+      unpaidCount,
+      regPokok,
+      regJasa
+    };
+  }, [activeLoanContract, selectedInstallments]);
 
   // Calculate remaining principal dynamically for print / view
   const getRemainingPrincipal = (pId: string, _totalContractDebt?: number, currentAngsuran?: Angsuran) => {
@@ -753,6 +979,21 @@ export function KasMasukView({
       nominalToPay = valAngsuranPokok + valAngsuranJasa;
 
       if (!isNaN(nominalToPay) && nominalToPay > 0) {
+        // --- VALIDASI KRONOLOGIS PEMILIHAN BULAN ANGSURAN ---
+        const tenor = activeLoanContract.contract.tenor || 10;
+        const related = activeLoanContract.relatedPayments || [];
+        const allUnpaid: number[] = [];
+        for (let k = 1; k <= tenor; k++) {
+          const isPaid = related.some(a => a.bulanKe === k) || (related.filter(a => !a.bulanKe).length >= k);
+          if (!isPaid) allUnpaid.push(k);
+        }
+
+        const chronoCheck = validateChronologicalInstallments(selectedInstallments, allUnpaid);
+        if (!chronoCheck.isValid) {
+          alert(`⚠️ Validasi Urutan Angsuran:\n\n${chronoCheck.error}\n\nPastikan pemilihan bulan angsuran berurutan secara kronologis sesuai sisa tenor pinjaman.`);
+          return;
+        }
+
         hasInstallmentToBook = true;
         const afterPayAmount = activeLoanContract.totalTerbayar + nominalToPay;
         isLunas = isBayarLunas || (valAngsuranPokok >= activeLoanContract.sisaPokok) || (afterPayAmount >= activeLoanContract.contract.totalWajibBayar);
@@ -761,7 +1002,7 @@ export function KasMasukView({
         if (!forceBypassWarning) {
           const nomPinjaman = activeLoanContract.contract.nominalPinjaman || 0;
           const isDuaBulan = payOption === 'dua_bulan';
-          const multiplier = isDuaBulan ? 2 : 1;
+          const multiplier = selectedInstallments.length > 0 ? selectedInstallments.length : (isDuaBulan ? 2 : 1);
           const defPokok = isBayarLunas
             ? activeLoanContract.sisaPokok
             : Math.min(
@@ -845,14 +1086,36 @@ export function KasMasukView({
         });
       }
       if (valWajib > 0) {
-        batchData.push({
-          anggotaId,
-          tanggal,
-          jenis: 'Wajib',
-          jumlah: valWajib,
-          keterangan: keteranganSimpanan || 'Pembayaran Setoran Wajib',
-          transaksiId: tId
-        });
+        const activeMonths = selectedMonthsWajib.length > 0 ? selectedMonthsWajib : [periodeBulanWajib];
+        if (activeMonths.length > 1) {
+          const nominalPerBulan = Math.floor(valWajib / activeMonths.length);
+          const remainder = valWajib - (nominalPerBulan * activeMonths.length);
+          activeMonths.forEach((ym, idx) => {
+            const amountThisMonth = nominalPerBulan + (idx === 0 ? remainder : 0);
+            batchData.push({
+              anggotaId,
+              tanggal,
+              jenis: 'Wajib',
+              jumlah: amountThisMonth,
+              keterangan: keteranganSimpanan || `Pembayaran Simpanan Wajib (${formatYearMonthIndo(ym)}) [${idx + 1}/${activeMonths.length} Bulan]`,
+              transaksiId: tId,
+              periodeBulan: ym,
+              bulan: formatYearMonthIndo(ym)
+            });
+          });
+        } else {
+          const ym = activeMonths[0] || periodeBulanWajib;
+          batchData.push({
+            anggotaId,
+            tanggal,
+            jenis: 'Wajib',
+            jumlah: valWajib,
+            keterangan: keteranganSimpanan || `Pembayaran Setoran Wajib (${formatYearMonthIndo(ym)})`,
+            transaksiId: tId,
+            periodeBulan: ym,
+            bulan: formatYearMonthIndo(ym)
+          });
+        }
       }
       if (valSukarela > 0) {
         batchData.push({
@@ -871,67 +1134,73 @@ export function KasMasukView({
     // Process Installment Booking
     let bookedInstallmentData: any = undefined;
     if (hasInstallmentToBook && activeLoanContract) {
-      if (payOption === 'dua_bulan') {
+      const activeInstList = selectedInstallments.length > 0 ? selectedInstallments : [bulanKe];
+      if (activeInstList.length > 1) {
+        const count = activeInstList.length;
         const nomPinjaman = activeLoanContract.contract.nominalPinjaman || 0;
         const regPokok = activeLoanContract.contract.angsuranPokokPerBulan || Math.round(nomPinjaman / (activeLoanContract.contract.tenor || 1));
         const regJasa = activeLoanContract.jasaBulanBerjalan > 0 
           ? activeLoanContract.jasaBulanBerjalan 
           : Math.round(nomPinjaman * 0.015);
 
-        let pokok1 = Math.round(valAngsuranPokok / 2);
-        let pokok2 = valAngsuranPokok - pokok1;
-        let jasa1 = Math.round(valAngsuranJasa / 2);
-        let jasa2 = valAngsuranJasa - jasa1;
+        const isExactMatch = (valAngsuranPokok === regPokok * count) && (valAngsuranJasa === regJasa * count);
+        const angsuranBatch: Omit<Angsuran, 'id'>[] = [];
+        const receiptList: any[] = [];
+        let remPokok = valAngsuranPokok;
+        let remJasa = valAngsuranJasa;
 
-        if (valAngsuranPokok === regPokok * 2 && valAngsuranJasa === regJasa * 2) {
-          pokok1 = regPokok;
-          pokok2 = regPokok;
-          jasa1 = regJasa;
-          jasa2 = regJasa;
-        }
+        activeInstList.forEach((bK, idx) => {
+          const isLast = idx === count - 1;
+          let pItem = 0;
+          let jItem = 0;
+          if (isExactMatch) {
+            pItem = regPokok;
+            jItem = regJasa;
+          } else {
+            pItem = isLast ? remPokok : Math.round(valAngsuranPokok / count);
+            jItem = isLast ? remJasa : Math.round(valAngsuranJasa / count);
+            remPokok -= pItem;
+            remJasa -= jItem;
+          }
 
-        const angsuran1: Omit<Angsuran, 'id'> = {
-          pinjamanId: activeLoanContract.contract.id,
-          anggotaId: activeLoanContract.contract.anggotaId,
-          tanggal,
-          pokokBayar: pokok1,
-          jasaBayar: jasa1,
-          jumlahBayar: pokok1 + jasa1,
-          bulanKe: bulanKe,
-          keterangan: notes 
-            ? `${notes} (Angsuran Ke-${bulanKe} - Tunggakan Bulan Kemarin)` 
-            : `Angsuran ke-${bulanKe} (Tunggakan Bulan Kemarin)`
-        };
+          const ketItem = notes 
+            ? `${notes} (Angsuran Ke-${bK} [${idx + 1}/${count}])` 
+            : `Angsuran ke-${bK} (${idx === 0 ? 'Tunggakan' : 'Bulan Berjalan'})`;
 
-        const angsuran2: Omit<Angsuran, 'id'> = {
-          pinjamanId: activeLoanContract.contract.id,
-          anggotaId: activeLoanContract.contract.anggotaId,
-          tanggal,
-          pokokBayar: pokok2,
-          jasaBayar: jasa2,
-          jumlahBayar: pokok2 + jasa2,
-          bulanKe: bulanKe + 1,
-          keterangan: notes 
-            ? `${notes} (Angsuran Ke-${bulanKe + 1} - Bulan Berjalan)` 
-            : `Angsuran ke-${bulanKe + 1} (Bulan Berjalan)`
-        };
+          angsuranBatch.push({
+            pinjamanId: activeLoanContract.contract.id,
+            anggotaId: activeLoanContract.contract.anggotaId,
+            tanggal,
+            pokokBayar: pItem,
+            jasaBayar: jItem,
+            jumlahBayar: pItem + jItem,
+            bulanKe: bK,
+            keterangan: ketItem
+          });
 
-        onAddAngsuran([angsuran1, angsuran2], isLunas);
+          receiptList.push({
+            bulanKe: bK,
+            pokokBayar: pItem,
+            jasaBayar: jItem,
+            jumlahBayar: pItem + jItem,
+            keterangan: ketItem
+          });
+        });
+
+        onAddAngsuran(angsuranBatch, isLunas);
 
         bookedInstallmentData = {
           pinjamanId: activeLoanContract.contract.id,
-          bulanKe: bulanKe,
+          bulanKe: activeInstList[0],
           pokokBayar: valAngsuranPokok,
           jasaBayar: valAngsuranJasa,
           jumlahBayar: nominalToPay,
           remaining: Math.max(0, activeLoanContract.sisaPokok - valAngsuranPokok),
-          keterangan: notes || `Bayar 2 Bulan Sekaligus (Bulan Ke-${bulanKe} Tunggakan & Bulan Ke-${bulanKe + 1} Berjalan)`,
-          angsuranList: [
-            { bulanKe: bulanKe, pokokBayar: pokok1, jasaBayar: jasa1, jumlahBayar: pokok1 + jasa1, keterangan: `Angsuran Ke-${bulanKe} (Tunggakan Bulan Kemarin)` },
-            { bulanKe: bulanKe + 1, pokokBayar: pokok2, jasaBayar: jasa2, jumlahBayar: pokok2 + jasa2, keterangan: `Angsuran Ke-${bulanKe + 1} (Bulan Berjalan)` }
-          ]
+          keterangan: notes || `Bayar ${count} Bulan Angsuran Sekaligus (Ke-${activeInstList.join(', ')})`,
+          angsuranList: receiptList
         };
       } else {
+        const targetBulanKe = activeInstList[0] || bulanKe;
         onAddAngsuran({
           pinjamanId: activeLoanContract.contract.id,
           anggotaId: activeLoanContract.contract.anggotaId,
@@ -939,18 +1208,18 @@ export function KasMasukView({
           pokokBayar: valAngsuranPokok,
           jasaBayar: valAngsuranJasa,
           jumlahBayar: nominalToPay,
-          bulanKe: bulanKe,
-          keterangan: notes || `Pembayaran angsuran ke-${bulanKe}`
+          bulanKe: targetBulanKe,
+          keterangan: notes || `Pembayaran angsuran ke-${targetBulanKe}`
         }, isLunas);
 
         bookedInstallmentData = {
           pinjamanId: activeLoanContract.contract.id,
-          bulanKe: bulanKe,
+          bulanKe: targetBulanKe,
           pokokBayar: valAngsuranPokok,
           jasaBayar: valAngsuranJasa,
           jumlahBayar: nominalToPay,
           remaining: Math.max(0, activeLoanContract.sisaPokok - valAngsuranPokok),
-          keterangan: notes || `Pembayaran angsuran ke-${bulanKe}`
+          keterangan: notes || `Pembayaran angsuran ke-${targetBulanKe}`
         };
       }
     }
@@ -963,7 +1232,9 @@ export function KasMasukView({
         items: batchData.map(b => ({
           jenis: b.jenis as any,
           jumlah: b.jumlah,
-          keterangan: b.keterangan
+          keterangan: b.keterangan,
+          periodeBulan: (b as any).periodeBulan,
+          bulan: (b as any).bulan
         })),
         angsuran: bookedInstallmentData,
         txId: tId,
@@ -1019,7 +1290,7 @@ export function KasMasukView({
 
     const savingsRows = data.items ? data.items.map(item => `
       <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 9px; margin-top: 4px;">
-        <span>Simpanan ${item.jenis} ${item.jumlah < 0 ? '(Penarikan)' : ''}</span>
+        <span>Simpanan ${item.jenis} ${item.jumlah < 0 ? '(Penarikan)' : ''} ${(item as any).bulan ? `[Bulan: ${(item as any).bulan}]` : ''}</span>
         <span>${formatRupiah(Math.abs(item.jumlah))}</span>
       </div>
       ${item.keterangan ? `<div style="font-size: 8px; font-style: italic; color: #444; margin-left: 10px; margin-bottom: 4px;">${item.keterangan}</div>` : ''}
@@ -1383,6 +1654,109 @@ export function KasMasukView({
     printWindow.document.close();
   };
 
+  const handleExportRekapWajibExcel = () => {
+    const dataToExport = filteredRekapWajibRows.map((r, idx) => ({
+      'No': idx + 1,
+      'No. Anggota': r.member.noAnggota,
+      'Nama Anggota': r.member.nama,
+      'No. HP / WA': r.member.noHp || '-',
+      'Pekerjaan': r.member.pekerjaan || '-',
+      'Periode Bulan': formatYearMonthIndo(rekapWajibMonth),
+      'Status Pembayaran': r.isPaid ? 'Sudah Lunas' : 'Belum Membayar',
+      'Nominal Iuran Wajib': expectedNominalWajib,
+      'Jumlah Terbayar': r.totalPaid,
+      'Sisa Tunggakan': r.isPaid ? 0 : expectedNominalWajib,
+      'Tanggal Bayar Terakhir': r.paymentDate || r.latestPayment?.tanggal || '-'
+    }));
+
+    exportToExcel(
+      dataToExport, 
+      `Rekap_Simpanan_Wajib_${rekapWajibMonth}_${rekapWajibStatusFilter}`, 
+      `Rekap Wajib ${rekapWajibMonth}`
+    );
+  };
+
+  const handlePrintRekapWajib = () => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert("Harap izinkan pop-up browser untuk mencetak rekap laporan!");
+      return;
+    }
+
+    const kopName = setup?.namaKoperasi || "Koperasi Dana Segar";
+    const kopAlamat = setup?.alamatKantor || "Jl. Koperasi Makmur No. 12";
+
+    const rowsHtml = filteredRekapWajibRows.map((r, idx) => `
+      <tr style="${!r.isPaid ? 'background-color: #fff1f2;' : ''}">
+        <td style="text-align: center;">${idx + 1}</td>
+        <td>${r.member.noAnggota}</td>
+        <td><strong>${r.member.nama}</strong></td>
+        <td>${r.member.noHp || '-'}</td>
+        <td style="text-align: center;">
+          <span style="padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 10px; ${r.isPaid ? 'background-color: #d1fae5; color: #065f46;' : 'background-color: #fee2e2; color: #991b1b;'}">
+            ${r.isPaid ? 'LUNAS' : 'BELUM BAYAR'}
+          </span>
+        </td>
+        <td style="text-align: right;">${formatRupiah(r.totalPaid)}</td>
+        <td style="text-align: right; color: ${r.isPaid ? '#059669' : '#dc2626'}; font-weight: bold;">
+          ${r.isPaid ? 'Rp 0' : formatRupiah(expectedNominalWajib)}
+        </td>
+      </tr>
+    `).join('');
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Rekap_Simpanan_Wajib_${rekapWajibMonth}</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; font-size: 11px; }
+            h2, p { margin: 2px 0; }
+            table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+            th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }
+            th { background-color: #f8fafc; font-weight: bold; }
+            @media print { body { padding: 5mm; } }
+          </style>
+        </head>
+        <body onload="window.print(); window.close();">
+          <h2>${kopName.toUpperCase()}</h2>
+          <p>${kopAlamat}</p>
+          <p style="font-weight: bold; font-size: 13px; margin-top: 8px;">
+            REKAPITULASI LAPORAN SIMPANAN WAJIB BULAN: ${formatYearMonthIndo(rekapWajibMonth).toUpperCase()}
+          </p>
+          <p style="color: #64748b; font-size: 10px;">Dicetak pada: ${new Date().toLocaleDateString('id-ID')} | Status Filter: ${rekapWajibStatusFilter.toUpperCase()}</p>
+          <hr style="margin: 10px 0;" />
+
+          <table style="width: 100%; margin-bottom: 15px; border: none;">
+            <tr style="border: none;">
+              <td style="border: none; padding: 4px;">Total Anggota: <b>${rekapWajibData.totalMembers} Orang</b></td>
+              <td style="border: none; padding: 4px;">Sudah Lunas: <b style="color: #059669;">${rekapWajibData.paidCount} Orang (${formatRupiah(rekapWajibData.totalCollected)})</b></td>
+              <td style="border: none; padding: 4px;">Belum Membayar: <b style="color: #dc2626;">${rekapWajibData.unpaidCount} Orang (${formatRupiah(rekapWajibData.totalUnpaidNominal)})</b></td>
+              <td style="border: none; padding: 4px;">Tingkat Kepatuhan: <b>${rekapWajibData.kepatuhanPercent}%</b></td>
+            </tr>
+          </table>
+
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 30px; text-align: center;">No</th>
+                <th style="width: 80px;">No. Anggota</th>
+                <th>Nama Lengkap Anggota</th>
+                <th>No. Telepon / WA</th>
+                <th style="width: 90px; text-align: center;">Status</th>
+                <th style="width: 100px; text-align: right;">Sudah Disetor</th>
+                <th style="width: 100px; text-align: right;">Sisa Tagihan</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+  };
+
   // Simulated Push Notification
   const handlePushNotice = (nama: string, sisa: number, phone: string) => {
     alert(`NOTIFIKASI SIMULASI PUSH: Tagihan Pinjaman ${nama} tersisa: ${formatRupiah(sisa)}. Pengingat terkirim via WA ke ${phone}.`);
@@ -1651,13 +2025,21 @@ export function KasMasukView({
               </div>
             </td>
             <td className="px-4 py-3">
-              <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${
-                item.jenis === 'Pokok' ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800' :
-                item.jenis === 'Wajib' ? 'bg-amber-50 text-amber-700 dark:bg-amber-955/40 dark:text-amber-450 border border-amber-200 dark:border-amber-800' :
-                'bg-teal-50 text-teal-700 dark:bg-teal-950/40 dark:text-teal-400 border border-teal-200 dark:border-teal-800'
-              }`}>
-                {item.jenis}
-              </span>
+              <div className="flex flex-col gap-1 items-start">
+                <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${
+                  item.jenis === 'Pokok' ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800' :
+                  item.jenis === 'Wajib' ? 'bg-amber-50 text-amber-700 dark:bg-amber-955/40 dark:text-amber-450 border border-amber-200 dark:border-amber-800' :
+                  'bg-teal-50 text-teal-700 dark:bg-teal-950/40 dark:text-teal-400 border border-teal-200 dark:border-teal-800'
+                }`}>
+                  {item.jenis}
+                </span>
+                {item.jenis === 'Wajib' && (item.bulan || item.periodeBulan) && (
+                  <span className="text-[9.5px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-100/70 dark:bg-amber-950/60 px-1.5 py-0.5 rounded border border-amber-200/60 dark:border-amber-800/60 inline-flex items-center gap-1 font-sans">
+                    <Calendar className="w-2.5 h-2.5 text-amber-600" />
+                    <span>{item.bulan || formatYearMonthIndo(item.periodeBulan)}</span>
+                  </span>
+                )}
+              </div>
             </td>
             <td className="px-4 py-3 font-sans text-slate-600 dark:text-slate-350 max-w-[240px] truncate">
               {item.keterangan || <span className="text-slate-350 italic">-</span>}
@@ -1745,6 +2127,11 @@ export function KasMasukView({
             }`}>
               {item.jenis}
             </span>
+            {item.jenis === 'Wajib' && (item.bulan || item.periodeBulan) && (
+              <span className="block text-[8px] text-amber-700 dark:text-amber-400 font-semibold mt-0.5">
+                {item.bulan || formatYearMonthIndo(item.periodeBulan)}
+              </span>
+            )}
           </td>
           <td className={`px-4 py-2.5 font-bold font-mono ${item.jumlah < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-slate-850 dark:text-slate-100'}`}>
             {item.jumlah < 0 ? `-${formatRupiah(Math.abs(item.jumlah))}` : formatRupiah(item.jumlah)}
@@ -2026,7 +2413,7 @@ export function KasMasukView({
   return (
     <div className="space-y-6">
       {/* Banner Notifikasi Setoran Mandiri Anggota Menunggu Validasi */}
-      {pembayaranPending && pembayaranPending.filter(p => p.status === 'Pending').length > 0 && (
+      {!isKasir && pembayaranPending && pembayaranPending.filter(p => p.status === 'Pending').length > 0 && (
         <div className="bg-gradient-to-r from-amber-500/10 via-amber-500/15 to-purple-500/10 border-2 border-amber-400 dark:border-amber-500/60 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-amber-500 text-white rounded-xl shadow-xs shrink-0 animate-bounce">
@@ -2073,35 +2460,50 @@ export function KasMasukView({
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-base font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
                 <span className="p-2 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 rounded-lg"><HandCoins className="w-5 h-5"/></span>
-                Manajemen Kas
+                {isKasir ? "Entri Pendapatan Kas" : "Manajemen Kas"}
               </h3>
-              <button 
-                onClick={() => { setIsManasukaModalOpen(true); handleCalculateManasuka(); }}
-                className="text-white bg-slate-800 hover:bg-slate-900 dark:bg-slate-950 dark:hover:bg-slate-900 border border-slate-700 font-bold text-[11px] px-2.5 py-1.5 rounded-lg flex items-center gap-1 cursor-pointer transition shadow"
-              >
-                <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400 shrink-0"/> Dividen Manasuka {setup.jasaSimpananSukarelaPersen}%
-              </button>
+              {!isKasir && (
+                <button 
+                  onClick={() => { setIsManasukaModalOpen(true); handleCalculateManasuka(); }}
+                  className="text-white bg-slate-800 hover:bg-slate-900 dark:bg-slate-950 dark:hover:bg-slate-900 border border-slate-700 font-bold text-[11px] px-2.5 py-1.5 rounded-lg flex items-center gap-1 cursor-pointer transition shadow"
+                >
+                  <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400 shrink-0"/> Dividen Manasuka {setup.jasaSimpananSukarelaPersen}%
+                </button>
+              )}
             </div>
 
             {/* Form Mode Selector */}
-            <div className="flex bg-slate-100 dark:bg-slate-900 p-1 rounded-xl mb-4 text-[11px] font-bold gap-1 font-sans">
-              <button
-                type="button"
-                onClick={() => setFormMode('kas_masuk')}
-                className={`flex-1 py-2 text-center rounded-lg transition cursor-pointer ${formMode === 'kas_masuk' ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs border border-slate-150/55 dark:border-slate-700/60' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'}`}
-              >
-                Setoran Anggota
-              </button>
-              <button
-                type="button"
-                onClick={() => setFormMode('pendapatan')}
-                className={`flex-1 py-2 text-center rounded-lg transition cursor-pointer ${formMode === 'pendapatan' ? 'bg-white dark:bg-slate-800 text-teal-700 dark:text-teal-400 shadow-xs border border-slate-150/55 dark:border-slate-700/60' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'}`}
-              >
-                Pendapatan Kas
-              </button>
-            </div>
+            {isKasir ? (
+              <div className="flex items-center justify-between bg-teal-50 dark:bg-teal-950/40 p-2.5 rounded-xl mb-4 border border-teal-200 dark:border-teal-800 text-teal-800 dark:text-teal-300">
+                <div className="flex items-center gap-2 text-xs font-bold">
+                  <TrendingUp className="w-4 h-4 text-teal-600 dark:text-teal-400" />
+                  <span>Entri Pendapatan Kas (Akses Kasir)</span>
+                </div>
+                <span className="text-[10px] bg-teal-100 dark:bg-teal-900/60 text-teal-700 dark:text-teal-300 px-2 py-0.5 rounded-md font-semibold flex items-center gap-1">
+                  <Shield className="w-3 h-3 text-teal-600 dark:text-teal-400" />
+                  Otorisasi Kasir
+                </span>
+              </div>
+            ) : (
+              <div className="flex bg-slate-100 dark:bg-slate-900 p-1 rounded-xl mb-4 text-[11px] font-bold gap-1 font-sans">
+                <button
+                  type="button"
+                  onClick={() => setFormMode('kas_masuk')}
+                  className={`flex-1 py-2 text-center rounded-lg transition cursor-pointer ${formMode === 'kas_masuk' ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs border border-slate-150/55 dark:border-slate-700/60' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'}`}
+                >
+                  Setoran Anggota
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFormMode('pendapatan')}
+                  className={`flex-1 py-2 text-center rounded-lg transition cursor-pointer ${formMode === 'pendapatan' ? 'bg-white dark:bg-slate-800 text-teal-700 dark:text-teal-400 shadow-xs border border-slate-150/55 dark:border-slate-700/60' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'}`}
+                >
+                  Pendapatan Kas
+                </button>
+              </div>
+            )}
 
-          {formMode === 'pendapatan' ? (
+          {formMode === 'pendapatan' || isKasir ? (
             <form onSubmit={handleIncomeSubmit} className="space-y-4 text-sm">
               <div className="p-3 bg-teal-50 dark:bg-teal-950/20 border border-teal-200 dark:border-teal-900/40 rounded-xl text-teal-800 dark:text-teal-300 text-xs font-medium flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 shrink-0 text-teal-600 dark:text-teal-400" />
@@ -2175,7 +2577,7 @@ export function KasMasukView({
                 <Plus className="w-4 h-4" /> Simpan Pendapatan ke Kas Masuk
               </button>
             </form>
-          ) : (
+          ) : !isKasir ? (
             <form onSubmit={handleUnifiedSubmit} className="space-y-4 text-sm">
               {/* 1. Member Selector */}
               <div className="space-y-1">
@@ -2251,21 +2653,179 @@ export function KasMasukView({
                 </div>
 
                 {/* Wajib */}
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 flex justify-between">
-                    <span>Simpanan Wajib</span>
-                    <span className="text-[9px] text-amber-600 font-bold bg-amber-50 dark:bg-amber-950/40 px-1.5 rounded">Rutin Bulanan (50.000)</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-3 top-2.5 text-xs text-slate-400 font-medium font-mono">Rp</span>
-                    <input 
-                      type="text"
-                      inputMode="numeric"
-                      className="w-full pl-9 pr-4 py-2 text-xs bg-white dark:bg-slate-900 border rounded-lg text-slate-850 dark:text-slate-200 border-slate-200 dark:border-slate-700 font-mono"
-                      value={jumlahWajib}
-                      onChange={(e) => setJumlahWajib(formatInputRupiah(e.target.value))}
+                <div className="space-y-1.5 p-2.5 bg-amber-50/40 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-800/40 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Simpanan Wajib</span>
+                    </label>
+                    <span className="text-[9px] text-amber-700 dark:text-amber-300 font-bold bg-amber-100/80 dark:bg-amber-900/50 px-2 py-0.5 rounded-full border border-amber-300 dark:border-amber-700">
+                      Rutin Bulanan ({formatRupiah(setup?.nominalSimpananWajib || 50000)})
+                    </span>
+                  </div>
+
+                  {/* Kalender 4 Kolom x 3 Baris Pembayaran Simpanan Wajib */}
+                  <div className="pt-1">
+                    <KalenderSimpananWajib
+                      memberId={anggotaId}
+                      memberNama={members.find(m => m.id === anggotaId)?.nama}
+                      memberNoAnggota={members.find(m => m.id === anggotaId)?.noAnggota}
+                      simpananList={simpanan}
+                      nominalWajib={setup?.nominalSimpananWajib || 50000}
+                      selectedMonthYM={periodeBulanWajib}
+                      selectedMonths={selectedMonthsWajib}
+                      onSelectMonths={handleSelectMonthsWajib}
+                      compact={true}
                     />
                   </div>
+
+                  {/* Multi-Month Summary & Month Picker */}
+                  <div className="space-y-1.5 pt-1">
+                    <div className="flex items-center justify-between text-[10px] flex-wrap gap-1">
+                      <span className="font-bold text-amber-900 dark:text-amber-200">
+                        Bulan Iuran Yang Dipilih ({selectedMonthsWajib.length} Bulan):
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleSelectMonthsWajib([currentRunningMonthYM])}
+                          className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold transition cursor-pointer border ${
+                            selectedMonthsWajib.length === 1 && selectedMonthsWajib[0] === currentRunningMonthYM
+                              ? 'bg-amber-600 text-white border-amber-700 shadow-2xs'
+                              : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          Bulan Berjalan ({formatYearMonthIndo(currentRunningMonthYM)})
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Chips / Pills of all selected months */}
+                    {selectedMonthsWajib.length > 0 && (
+                      <div className="flex flex-wrap gap-1 p-1.5 bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/80 rounded-lg">
+                        {selectedMonthsWajib.map((ym) => (
+                          <span 
+                            key={ym} 
+                            className="inline-flex items-center gap-1 px-2 py-0.5 bg-white dark:bg-slate-850 text-amber-900 dark:text-amber-200 text-xs font-bold rounded-md border border-amber-300 dark:border-amber-700 font-mono shadow-2xs"
+                          >
+                            <span>{formatYearMonthIndo(ym)}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = selectedMonthsWajib.filter(x => x !== ym);
+                                handleSelectMonthsWajib(next.length > 0 ? next : [currentRunningMonthYM]);
+                              }}
+                              className="text-slate-400 hover:text-rose-600 cursor-pointer ml-0.5 font-bold"
+                              title="Hapus bulan ini dari pilihan bayar"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2">
+                      <input 
+                        type="month"
+                        value={periodeBulanWajib || ''}
+                        onChange={(e) => {
+                          const targetMonth = e.target.value;
+                          if (targetMonth) {
+                            if (anggotaId) {
+                              const st = getMemberWajibMonthStatus(anggotaId, simpanan, targetMonth, setup?.nominalSimpananWajib || 50000);
+                              if (st.isPaid) {
+                                setPaidMonthWarning(`Bulan ${formatYearMonthIndo(targetMonth)} sudah LUNAS dan tidak dapat dipilih lagi.`);
+                                setTimeout(() => setPaidMonthWarning(null), 4000);
+                                return;
+                              }
+                            }
+                            setPaidMonthWarning(null);
+                            if (!selectedMonthsWajib.includes(targetMonth)) {
+                              handleSelectMonthsWajib([...selectedMonthsWajib, targetMonth].sort());
+                            } else {
+                              setPeriodeBulanWajib(targetMonth);
+                            }
+                          }
+                        }}
+                        className="w-full px-2.5 py-1.5 text-xs bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 rounded-lg text-slate-800 dark:text-slate-200 font-bold focus:outline-amber-600 cursor-pointer shadow-2xs font-mono"
+                        title="Pilih atau tambahkan bulan iuran yang belum lunas"
+                      />
+                    </div>
+
+                    {/* Paid Month Alert Warning */}
+                    {paidMonthWarning && (
+                      <div className="p-2 bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 rounded-lg text-[10.5px] text-rose-700 dark:text-rose-300 flex items-center gap-1.5 font-semibold animate-pulse">
+                        <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                        <span>{paidMonthWarning}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Nominal Input (Automatically calculated: count * 50.000) */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="font-semibold text-slate-500 dark:text-slate-400">NOMINAL SETORAN WAJIB (RP):</span>
+                      <span className="font-bold text-amber-700 dark:text-amber-400 font-mono">
+                        {selectedMonthsWajib.length} Bulan × {formatRupiah(setup?.nominalSimpananWajib || 50000)}
+                      </span>
+                    </div>
+                    <div className="relative">
+                      <span className="absolute left-3 top-2.5 text-xs text-slate-400 font-medium font-mono">Rp</span>
+                      <input 
+                        type="text"
+                        inputMode="numeric"
+                        className="w-full pl-9 pr-4 py-2 text-xs bg-white dark:bg-slate-900 border rounded-lg text-slate-850 dark:text-slate-200 border-amber-300 dark:border-amber-700 font-mono font-bold focus:ring-2 focus:ring-amber-500"
+                        value={jumlahWajib}
+                        onChange={(e) => setJumlahWajib(formatInputRupiah(e.target.value))}
+                      />
+                    </div>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400 italic">
+                      *Nominal otomatis disesuaikan dengan {selectedMonthsWajib.length} bulan yang dipilih ({formatRupiah(selectedMonthsWajib.length * (setup?.nominalSimpananWajib || 50000))}). Anda dapat mengubah nominal jika diperlukan.
+                    </p>
+                  </div>
+
+                  {/* Status indicator for selected member & month */}
+                  {anggotaId && (
+                    <div className="pt-0.5">
+                      {(() => {
+                        const m = members.find(mem => mem.id === anggotaId);
+                        if (!m) return null;
+                        
+                        if (selectedMonthsWajib.length > 1) {
+                          return (
+                            <div className="px-2.5 py-1.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-[10px] text-amber-900 dark:text-amber-200 flex items-center justify-between">
+                              <span className="flex items-center gap-1.5 font-medium">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                <span>{m.nama}: Pembayaran {selectedMonthsWajib.length} bulan iuran ({selectedMonthsWajib.map(formatYearMonthIndo).join(', ')})</span>
+                              </span>
+                              <span className="font-bold font-mono text-xs">{formatRupiah(selectedMonthsWajib.length * (setup?.nominalSimpananWajib || 50000))}</span>
+                            </div>
+                          );
+                        }
+
+                        const ym = selectedMonthsWajib[0] || periodeBulanWajib;
+                        const status = getMemberWajibMonthStatus(m, simpanan, ym, setup?.nominalSimpananWajib || 50000);
+                        return status.isPaid ? (
+                          <div className="px-2 py-1 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-lg text-[10px] text-emerald-800 dark:text-emerald-300 flex items-center justify-between">
+                            <span className="flex items-center gap-1 font-medium">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                              <span>{m.nama}: Sudah lunas untuk {formatYearMonthIndo(ym)}</span>
+                            </span>
+                            <span className="font-bold font-mono">{formatRupiah(status.totalPaid)}</span>
+                          </div>
+                        ) : (
+                          <div className="px-2 py-1 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 rounded-lg text-[10px] text-rose-800 dark:text-rose-300 flex items-center justify-between">
+                            <span className="flex items-center gap-1 font-medium">
+                              <AlertCircle className="w-3 h-3 text-rose-600 shrink-0" />
+                              <span>{m.nama}: Belum bayar bulan {formatYearMonthIndo(ym)}</span>
+                            </span>
+                            <span className="font-bold font-mono text-rose-600">Iuran: {formatRupiah(setup?.nominalSimpananWajib || 50000)}</span>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
                 </div>
 
                 {/* Sukarela */}
@@ -2324,55 +2884,15 @@ export function KasMasukView({
 
                   {includeInstallment ? (
                     <div className="space-y-3">
-                      {/* Tipe Pembayaran Angsuran */}
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase">Tipe Bayar Angsuran</label>
-                        <div className="grid grid-cols-3 gap-1.5 p-1 bg-white dark:bg-slate-900 rounded-lg border border-indigo-100 dark:border-indigo-900/40">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPayOption('rutin');
-                              setCustomAmount('');
-                              setNotes('');
-                            }}
-                            className={`py-1.5 px-1.5 text-[10px] font-bold rounded-md transition cursor-pointer text-center ${
-                              payOption === 'rutin'
-                                ? 'bg-indigo-600 text-white shadow-xs'
-                                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
-                            }`}
-                          >
-                            1 Bulan Rutin
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPayOption('dua_bulan');
-                            }}
-                            className={`py-1.5 px-1.5 text-[10px] font-bold rounded-md transition cursor-pointer text-center flex items-center justify-center gap-1 ${
-                              payOption === 'dua_bulan'
-                                ? 'bg-emerald-600 text-white shadow-xs'
-                                : 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 hover:bg-emerald-100'
-                            }`}
-                          >
-                            <span>⚡ 2 Bulan Sekaligus</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPayOption('lunas');
-                              setCustomAmount(formatInputRupiah(String(activeLoanContract.nominalBayarLunas)));
-                              setNotes(`Pelunasan Lunas Pinjaman (Sisa Pokok + Jasa Bulan Berjalan)`);
-                            }}
-                            className={`py-1.5 px-1.5 text-[10px] font-bold rounded-md transition cursor-pointer text-center flex items-center justify-center gap-1 ${
-                              payOption === 'lunas'
-                                ? 'bg-amber-500 text-white shadow-xs'
-                                : 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30'
-                            }`}
-                          >
-                            <span>Bayar Lunas</span>
-                          </button>
-                        </div>
-                      </div>
+                      {/* KALENDER / SELECTOR TOMBOL ANGSURAN KE-1 S.D KE-N (URUT KECIL, TIDAK BISA PILIH YANG SUDAH DIBAYAR) */}
+                      <KalenderAngsuranPinjaman
+                        pinjaman={activeLoanContract.contract}
+                        relatedPayments={activeLoanContract.relatedPayments}
+                        sisaPokok={activeLoanContract.sisaPokok}
+                        jasaBulanBerjalan={activeLoanContract.jasaBulanBerjalan}
+                        selectedInstallments={selectedInstallments}
+                        onSelectInstallments={handleSelectInstallments}
+                      />
 
                       {/* Active contract summary */}
                       <div className="p-3 bg-white dark:bg-slate-900/50 rounded-lg border border-indigo-50 dark:border-indigo-905 text-[10px] font-mono space-y-1.5 text-slate-700 dark:text-slate-300">
@@ -2415,60 +2935,50 @@ export function KasMasukView({
                         )}
                       </div>
 
-                      {/* 2 Bulan Sekaligus Breakdown Preview Card */}
-                      {payOption === 'dua_bulan' && (
-                        <div className="p-3 bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-950/40 dark:to-teal-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 space-y-2 text-xs">
+                      {/* Multi-Bulan Sekaligus Breakdown Preview Card */}
+                      {selectedInstallments.length > 1 && (
+                        <div className="p-3 bg-gradient-to-br from-emerald-50 to-indigo-50 dark:from-emerald-950/40 dark:to-indigo-950/30 rounded-xl border border-emerald-200 dark:border-indigo-800 space-y-2 text-xs">
                           <div className="flex items-center justify-between">
                             <span className="font-extrabold text-emerald-900 dark:text-emerald-300 flex items-center gap-1.5">
                               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                              Skema Pembayaran 2 Kali Angsuran Sekaligus
+                              Skema Pembayaran {selectedInstallments.length} Kali Angsuran Sekaligus
                             </span>
                             <span className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 font-mono text-[10px] font-bold">
-                              2 Record Terpisah
+                              {selectedInstallments.length} Record Terpisah
                             </span>
                           </div>
-                          <p className="text-[10.5px] text-emerald-800/90 dark:text-emerald-300/90 leading-relaxed">
-                            Mencatat pelunasan tunggakan bulan kemarin sekaligus setoran bulan berjalan. Sistem akan otomatis membuat <b>dua baris angsuran terpisah</b>:
+                          <p className="text-[10.5px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                            Mencatat {selectedInstallments.length} bulan angsuran sekaligus. Sistem akan otomatis membuat <b>{selectedInstallments.length} baris transaksi angsuran terpisah</b>:
                           </p>
-                          <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-                            <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/60 shadow-2xs">
-                              <div className="font-extrabold text-amber-700 dark:text-amber-400 mb-1 border-b border-amber-100 dark:border-amber-950 pb-1">
-                                1. Bulan Ke-{bulanKe} (Tunggakan)
-                              </div>
-                              <div className="text-slate-600 dark:text-slate-300 space-y-0.5">
-                                <div className="flex justify-between">
-                                  <span>Pokok:</span>
-                                  <span className="font-bold">{formatRupiah(Math.round(parseInputRupiah(angsuranPokok) / 2))}</span>
+                          <div className={`grid gap-2 text-[10px] font-mono ${selectedInstallments.length <= 2 ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'}`}>
+                            {selectedInstallments.map((bK, idx) => {
+                              const count = selectedInstallments.length;
+                              const nomPinjaman = activeLoanContract.contract.nominalPinjaman || 0;
+                              const regP = activeLoanContract.contract.angsuranPokokPerBulan || Math.round(nomPinjaman / (activeLoanContract.contract.tenor || 1));
+                              const regJ = activeLoanContract.jasaBulanBerjalan > 0 ? activeLoanContract.jasaBulanBerjalan : Math.round(nomPinjaman * 0.015);
+                              return (
+                                <div key={bK} className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-indigo-200 dark:border-indigo-900/60 shadow-2xs space-y-1">
+                                  <div className="font-extrabold text-indigo-700 dark:text-indigo-400 mb-1 border-b border-indigo-100 dark:border-indigo-950 pb-0.5 flex justify-between">
+                                    <span>Bulan Ke-{bK}</span>
+                                    <span className="text-[9px] font-normal text-slate-400">#{idx + 1}</span>
+                                  </div>
+                                  <div className="text-slate-600 dark:text-slate-300 space-y-0.5">
+                                    <div className="flex justify-between">
+                                      <span>Pokok:</span>
+                                      <span className="font-bold">{formatRupiah(regP)}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span>Jasa:</span>
+                                      <span className="font-bold">{formatRupiah(regJ)}</span>
+                                    </div>
+                                    <div className="flex justify-between font-bold border-t border-slate-200 dark:border-slate-800 pt-0.5 text-indigo-800 dark:text-indigo-200">
+                                      <span>Subtotal:</span>
+                                      <span>{formatRupiah(regP + regJ)}</span>
+                                    </div>
+                                  </div>
                                 </div>
-                                <div className="flex justify-between">
-                                  <span>Jasa:</span>
-                                  <span className="font-bold">{formatRupiah(Math.round(parseInputRupiah(angsuranJasa) / 2))}</span>
-                                </div>
-                                <div className="flex justify-between font-bold border-t border-slate-200 dark:border-slate-800 pt-0.5 text-slate-800 dark:text-slate-100">
-                                  <span>Subtotal:</span>
-                                  <span className="text-amber-700 dark:text-amber-300">{formatRupiah(Math.round((parseInputRupiah(angsuranPokok) + parseInputRupiah(angsuranJasa)) / 2))}</span>
-                                </div>
-                              </div>
-                            </div>
-                            <div className="bg-white/90 dark:bg-slate-900/90 p-2.5 rounded-lg border border-emerald-200 dark:border-emerald-900/60 shadow-2xs">
-                              <div className="font-extrabold text-indigo-700 dark:text-indigo-400 mb-1 border-b border-indigo-100 dark:border-indigo-950 pb-1">
-                                2. Bulan Ke-{bulanKe + 1} (Berjalan)
-                              </div>
-                              <div className="text-slate-600 dark:text-slate-300 space-y-0.5">
-                                <div className="flex justify-between">
-                                  <span>Pokok:</span>
-                                  <span className="font-bold">{formatRupiah(parseInputRupiah(angsuranPokok) - Math.round(parseInputRupiah(angsuranPokok) / 2))}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span>Jasa:</span>
-                                  <span className="font-bold">{formatRupiah(parseInputRupiah(angsuranJasa) - Math.round(parseInputRupiah(angsuranJasa) / 2))}</span>
-                                </div>
-                                <div className="flex justify-between font-bold border-t border-slate-200 dark:border-slate-800 pt-0.5 text-slate-800 dark:text-slate-100">
-                                  <span>Subtotal:</span>
-                                  <span className="text-indigo-700 dark:text-indigo-300">{formatRupiah((parseInputRupiah(angsuranPokok) + parseInputRupiah(angsuranJasa)) - Math.round((parseInputRupiah(angsuranPokok) + parseInputRupiah(angsuranJasa)) / 2))}</span>
-                                </div>
-                              </div>
-                            </div>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
@@ -2579,11 +3089,11 @@ export function KasMasukView({
                         </p>
                       </div>
 
-                      {/* Real-time Mismatch Alert Banner & Smart 2-Month Detection */}
+                      {/* Real-time Mismatch Alert Banner & Smart Multi-Month Detection */}
                       {(() => {
                         const nomPinjaman = activeLoanContract.contract.nominalPinjaman || 0;
                         const isDuaBulan = payOption === 'dua_bulan';
-                        const multiplier = isDuaBulan ? 2 : 1;
+                        const multiplier = selectedInstallments.length > 0 ? selectedInstallments.length : (isDuaBulan ? 2 : 1);
                         const defPokok = payOption === 'lunas'
                           ? activeLoanContract.sisaPokok
                           : Math.min(
@@ -2724,7 +3234,7 @@ export function KasMasukView({
               Bukukan Transaksi Kas Masuk
             </button>
           </form>
-          )}
+          ) : null}
         </div>
         )}
 
@@ -2733,69 +3243,115 @@ export function KasMasukView({
           {/* Header tabs toggle */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-100 dark:border-slate-700 pb-3 mb-4">
             <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 p-1 rounded-xl flex-wrap">
-              <button 
-                onClick={() => { setActiveTab('simpanan'); setFilterJenisOpt(''); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
-                  activeTab === 'simpanan' 
-                    ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs' 
-                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
-                }`}
-              >
-                <Wallet className="w-3.5 h-3.5" />
-                Data Mutasi Simpanan
-              </button>
-              <button 
-                onClick={() => { setActiveTab('angsuran'); setFilterJenisOpt(''); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
-                  activeTab === 'angsuran' 
-                    ? 'bg-white dark:bg-slate-800 text-indigo-700 dark:text-indigo-400 shadow-xs' 
-                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
-                }`}
-              >
-                <Calendar className="w-3.5 h-3.5" />
-                Data Mutasi Angsuran
-              </button>
-              <button 
-                onClick={() => { setActiveTab('pendapatan'); setFilterJenisOpt(''); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
-                  activeTab === 'pendapatan' 
-                    ? 'bg-white dark:bg-slate-800 text-teal-700 dark:text-teal-400 shadow-xs' 
-                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
-                }`}
-              >
-                <TrendingUp className="w-3.5 h-3.5" />
-                Pendapatan Kas ({income.length})
-              </button>
-              <button 
-                onClick={() => { setActiveTab('rekap_bulanan'); setFilterJenisOpt(''); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
-                  activeTab === 'rekap_bulanan' 
-                    ? 'bg-white dark:bg-slate-800 text-amber-700 dark:text-amber-400 shadow-xs' 
-                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
-                }`}
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-                Rekap Bulanan
-              </button>
-              <button 
-                onClick={() => { setActiveTab('pembayaran_pending'); setFilterJenisOpt(''); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
-                  activeTab === 'pembayaran_pending' 
-                    ? 'bg-white dark:bg-slate-800 text-purple-700 dark:text-purple-400 shadow-xs' 
-                    : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
-                }`}
-              >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Setoran Mandiri</span>
-                {pembayaranPending.filter(p => p.status === 'Pending').length > 0 && (
-                  <span className="bg-amber-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full shrink-0 animate-pulse">
-                    {pembayaranPending.filter(p => p.status === 'Pending').length}
+              {isKasir ? (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-white dark:bg-slate-800 text-teal-700 dark:text-teal-400 shadow-xs rounded-lg text-xs font-bold border border-teal-200 dark:border-teal-800">
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  <span>Riwayat Pendapatan Kas ({income.length})</span>
+                  <span className="text-[10px] bg-teal-100 dark:bg-teal-900/60 text-teal-800 dark:text-teal-300 px-1.5 py-0.5 rounded-full font-semibold ml-1">
+                    Akses Kasir
                   </span>
-                )}
-              </button>
+                </div>
+              ) : (
+                <>
+                  <button 
+                    onClick={() => { setActiveTab('simpanan'); setFilterJenisOpt(''); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                      activeTab === 'simpanan' 
+                        ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-xs' 
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                    }`}
+                  >
+                    <Wallet className="w-3.5 h-3.5" />
+                    Data Mutasi Simpanan
+                  </button>
+                  <button 
+                    onClick={() => { setActiveTab('angsuran'); setFilterJenisOpt(''); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                      activeTab === 'angsuran' 
+                        ? 'bg-white dark:bg-slate-800 text-indigo-700 dark:text-indigo-400 shadow-xs' 
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                    }`}
+                  >
+                    <Calendar className="w-3.5 h-3.5" />
+                    Data Mutasi Angsuran
+                  </button>
+                  <button 
+                    onClick={() => { setActiveTab('pendapatan'); setFilterJenisOpt(''); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                      activeTab === 'pendapatan' 
+                        ? 'bg-white dark:bg-slate-800 text-teal-700 dark:text-teal-400 shadow-xs' 
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                    }`}
+                  >
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    Pendapatan Kas ({income.length})
+                  </button>
+                  <button 
+                    onClick={() => { setActiveTab('rekap_bulanan'); setFilterJenisOpt(''); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                      activeTab === 'rekap_bulanan' 
+                        ? 'bg-white dark:bg-slate-800 text-amber-700 dark:text-amber-400 shadow-xs' 
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                    }`}
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    Rekap Bulanan
+                  </button>
+                  <button 
+                    onClick={() => { setActiveTab('rekap_wajib'); setFilterJenisOpt(''); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      activeTab === 'rekap_wajib' 
+                        ? 'bg-rose-600 text-white shadow-xs' 
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                    }`}
+                  >
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    <span>Rekap Belum Bayar Wajib</span>
+                    {rekapWajibData.unpaidCount > 0 && (
+                      <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full shrink-0 ${activeTab === 'rekap_wajib' ? 'bg-white text-rose-700' : 'bg-rose-500 text-white'}`}>
+                        {rekapWajibData.unpaidCount}
+                      </span>
+                    )}
+                  </button>
+                  <button 
+                    onClick={() => { setActiveTab('pembayaran_pending'); setFilterJenisOpt(''); }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                      activeTab === 'pembayaran_pending' 
+                        ? 'bg-white dark:bg-slate-800 text-purple-700 dark:text-purple-400 shadow-xs' 
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Setoran Mandiri</span>
+                    {pembayaranPending.filter(p => p.status === 'Pending').length > 0 && (
+                      <span className="bg-amber-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full shrink-0 animate-pulse">
+                        {pembayaranPending.filter(p => p.status === 'Pending').length}
+                      </span>
+                    )}
+                  </button>
+                </>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
+              {activeTab === 'rekap_wajib' && (
+                <>
+                  <button
+                    onClick={handlePrintRekapWajib}
+                    className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 dark:bg-slate-900 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 border border-slate-250 dark:border-slate-700 cursor-pointer shadow-xs"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    Cetak Rekap
+                  </button>
+                  <button
+                    onClick={handleExportRekapWajibExcel}
+                    className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 border border-emerald-200 dark:border-emerald-800 cursor-pointer shadow-xs"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    Export Excel
+                  </button>
+                </>
+              )}
               {activeTab === 'rekap_bulanan' && (
                 <>
                   <button
@@ -2888,83 +3444,45 @@ export function KasMasukView({
           )}
 
           {/* Quick Filters */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
-            <div className="space-y-1">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Cari Transaksi / Anggota</span>
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Cari ID / Nama / Ket..."
-                  className="w-full pl-8 pr-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-medium"
-                  value={tableSearchTerm}
-                  onChange={(e) => setTableSearchTerm(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Filter Listbox Anggota</span>
-              <select 
-                value={filterAnggotaOpt} 
-                onChange={(e) => setFilterAnggotaOpt(e.target.value)}
-                className="w-full px-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
-              >
-                <option value="">-- Semua Anggota --</option>
-                {sortedMembers.map(m => (
-                  <option key={m.id} value={m.id}>{m.nama} ({m.noAnggota})</option>
-                ))}
-              </select>
-            </div>
-
-            {activeTab === 'simpanan' ? (
+          {isKasir ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
               <div className="space-y-1">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Filter Jenis Simpanan</span>
-                <select 
-                  value={filterJenisOpt} 
-                  onChange={(e) => setFilterJenisOpt(e.target.value)}
-                  className="w-full px-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
-                >
-                  <option value="">-- Semua Jenis --</option>
-                  <option value="Pokok">Pokok</option>
-                  <option value="Wajib">Wajib</option>
-                  <option value="Sukarela">Sukarela</option>
-                </select>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Panduan Angsuran</span>
-                <div className="px-3 py-1.5 border bg-slate-50 dark:bg-slate-900/50 rounded-lg text-[10.5px] text-slate-500 font-medium truncate">
-                  Riwayat pembayaran tercatat sah
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Cari Pendapatan Kas</span>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Cari sumber atau keterangan pendapatan..."
+                    className="w-full pl-8 pr-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-medium"
+                    value={tableSearchTerm}
+                    onChange={(e) => setTableSearchTerm(e.target.value)}
+                  />
                 </div>
               </div>
-            )}
 
-            {/* Filter & Sortir Bulan */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Sortir / Filter Bulan</span>
-                {selectedMonthFilter !== 'semua' && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedMonthFilter('semua')}
-                    className="text-[9.5px] text-amber-600 dark:text-amber-400 hover:underline font-bold cursor-pointer"
-                  >
-                    ✕ Reset
-                  </button>
-                )}
-              </div>
-              <div className="flex items-center gap-1.5">
+              {/* Filter & Sortir Bulan */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Filter Bulan Penerimaan</span>
+                  {selectedMonthFilter !== 'semua' && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMonthFilter('semua')}
+                      className="text-[9.5px] text-amber-600 dark:text-amber-400 hover:underline font-bold cursor-pointer"
+                    >
+                      ✕ Reset
+                    </button>
+                  )}
+                </div>
                 <select 
                   value={selectedMonthFilter} 
                   onChange={(e) => setSelectedMonthFilter(e.target.value)}
-                  className="flex-1 px-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
-                  title="Filter transaksi berdasarkan bulan"
+                  className="w-full px-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
+                  title="Filter transaksi pendapatan berdasarkan bulan"
                 >
                   <option value="semua">🗓️ Semua Bulan</option>
                   {availableMonths.map(ym => {
-                    const countInMonth = (activeTab === 'simpanan' ? simpanan : angsuran)
-                      .filter((item: any) => item.tanggal && item.tanggal.startsWith(ym)).length;
+                    const countInMonth = (income || []).filter(item => item.tanggal && item.tanggal.startsWith(ym)).length;
                     return (
                       <option key={ym} value={ym}>
                         {formatYearMonthIndo(ym)} ({countInMonth})
@@ -2972,25 +3490,113 @@ export function KasMasukView({
                     );
                   })}
                 </select>
-                <button
-                  type="button"
-                  onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
-                  className={`p-1.5 rounded-lg border text-xs font-bold transition flex items-center justify-center shrink-0 cursor-pointer ${
-                    sortOrder === 'desc'
-                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
-                      : 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-800'
-                  }`}
-                  title={sortOrder === 'desc' ? "Urutan: Tanggal Terbaru ke Terlama (Klik untuk Terlama)" : "Urutan: Tanggal Terlama ke Terbaru (Klik untuk Terbaru)"}
-                >
-                  <ArrowUpDown className="w-3.5 h-3.5" />
-                  <span className="text-[10px] ml-1 hidden xl:inline">{sortOrder === 'desc' ? 'Terbaru' : 'Terlama'}</span>
-                </button>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Cari Transaksi / Anggota</span>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Cari ID / Nama / Ket..."
+                    className="w-full pl-8 pr-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-medium"
+                    value={tableSearchTerm}
+                    onChange={(e) => setTableSearchTerm(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Filter Listbox Anggota</span>
+                <select 
+                  value={filterAnggotaOpt} 
+                  onChange={(e) => setFilterAnggotaOpt(e.target.value)}
+                  className="w-full px-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                >
+                  <option value="">-- Semua Anggota --</option>
+                  {sortedMembers.map(m => (
+                    <option key={m.id} value={m.id}>{m.nama} ({m.noAnggota})</option>
+                  ))}
+                </select>
+              </div>
+
+              {activeTab === 'simpanan' ? (
+                <div className="space-y-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Filter Jenis Simpanan</span>
+                  <select 
+                    value={filterJenisOpt} 
+                    onChange={(e) => setFilterJenisOpt(e.target.value)}
+                    className="w-full px-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                  >
+                    <option value="">-- Semua Jenis --</option>
+                    <option value="Pokok">Pokok</option>
+                    <option value="Wajib">Wajib</option>
+                    <option value="Sukarela">Sukarela</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Panduan Angsuran</span>
+                  <div className="px-3 py-1.5 border bg-slate-50 dark:bg-slate-900/50 rounded-lg text-[10.5px] text-slate-500 font-medium truncate">
+                    Riwayat pembayaran tercatat sah
+                  </div>
+                </div>
+              )}
+
+              {/* Filter & Sortir Bulan */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Sortir / Filter Bulan</span>
+                  {selectedMonthFilter !== 'semua' && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMonthFilter('semua')}
+                      className="text-[9.5px] text-amber-600 dark:text-amber-400 hover:underline font-bold cursor-pointer"
+                    >
+                      ✕ Reset
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <select 
+                    value={selectedMonthFilter} 
+                    onChange={(e) => setSelectedMonthFilter(e.target.value)}
+                    className="flex-1 px-2.5 py-1.5 border rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
+                    title="Filter transaksi berdasarkan bulan"
+                  >
+                    <option value="semua">🗓️ Semua Bulan</option>
+                    {availableMonths.map(ym => {
+                      const countInMonth = (activeTab === 'simpanan' ? simpanan : angsuran)
+                        .filter((item: any) => item.tanggal && item.tanggal.startsWith(ym)).length;
+                      return (
+                        <option key={ym} value={ym}>
+                          {formatYearMonthIndo(ym)} ({countInMonth})
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
+                    className={`p-1.5 rounded-lg border text-xs font-bold transition flex items-center justify-center shrink-0 cursor-pointer ${
+                      sortOrder === 'desc'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                        : 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-800'
+                    }`}
+                    title={sortOrder === 'desc' ? "Urutan: Tanggal Terbaru ke Terlama (Klik untuk Terlama)" : "Urutan: Tanggal Terlama ke Terbaru (Klik untuk Terbaru)"}
+                  >
+                    <ArrowUpDown className="w-3.5 h-3.5" />
+                    <span className="text-[10px] ml-1 hidden xl:inline">{sortOrder === 'desc' ? 'Terbaru' : 'Terlama'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Monthly / Active Filter Info Bar (for simpanan & angsuran) */}
-          {(activeTab === 'simpanan' || activeTab === 'angsuran') && (
+          {(activeTab === 'simpanan' || activeTab === 'angsuran') && !isKasir && (
             <div className="mb-3.5 p-2.5 sm:p-3 bg-slate-50 dark:bg-slate-900/60 rounded-xl border border-slate-200 dark:border-slate-700/80 flex flex-wrap items-center justify-between gap-2.5 text-xs">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 flex items-center justify-center font-bold">
@@ -3061,7 +3667,7 @@ export function KasMasukView({
           )}
 
           {/* Data List Table container */}
-          {activeTab === 'pendapatan' ? (
+          {activeTab === 'pendapatan' || isKasir ? (
             <div className="space-y-4 flex-1 overflow-y-auto max-h-[520px] pr-1">
               {/* Income Header Bar & Stats */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -3360,6 +3966,260 @@ export function KasMasukView({
                   </>
                 );
               })()}
+            </div>
+          ) : activeTab === 'rekap_wajib' ? (
+            <div className="space-y-4 flex-1 overflow-y-auto max-h-[520px] pr-1">
+              {/* Header and Controls */}
+              <div className="bg-slate-50 dark:bg-slate-900/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700/80 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-rose-500" />
+                      <span>Rekap Pembayaran Simpanan Wajib</span>
+                    </h4>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      Iuran Simpanan Wajib ({formatRupiah(expectedNominalWajib)}/bulan) untuk memantau anggota yang belum atau sudah membayar.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={handlePrintRekapWajib}
+                      className="px-2.5 py-1.5 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg text-xs font-bold text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 flex items-center gap-1 shadow-2xs cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" /> Cetak
+                    </button>
+                    <button
+                      onClick={handleExportRekapWajibExcel}
+                      className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" /> Export Excel
+                    </button>
+                  </div>
+                </div>
+
+                {/* Metric Summary Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                  <div className="p-3 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Total Anggota</span>
+                    <p className="text-lg font-extrabold text-slate-800 dark:text-slate-100 font-mono mt-0.5">
+                      {rekapWajibData.totalMembers} <span className="text-xs font-normal text-slate-400">Orang</span>
+                    </p>
+                  </div>
+                  <div className="p-3 bg-emerald-50/60 dark:bg-emerald-950/20 rounded-xl border border-emerald-200 dark:border-emerald-800">
+                    <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Sudah Lunas</span>
+                    <p className="text-lg font-extrabold text-emerald-700 dark:text-emerald-400 font-mono mt-0.5">
+                      {rekapWajibData.paidCount} <span className="text-xs font-normal text-emerald-500">Orang</span>
+                    </p>
+                    <span className="text-[10px] text-emerald-600 font-mono block mt-0.5">{formatRupiah(rekapWajibData.totalCollected)}</span>
+                  </div>
+                  <div className="p-3 bg-rose-50/60 dark:bg-rose-950/20 rounded-xl border border-rose-200 dark:border-rose-800">
+                    <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider block">Belum Membayar</span>
+                    <p className="text-lg font-extrabold text-rose-600 dark:text-rose-400 font-mono mt-0.5">
+                      {rekapWajibData.unpaidCount} <span className="text-xs font-normal text-rose-500">Orang</span>
+                    </p>
+                    <span className="text-[10px] text-rose-600 font-mono block mt-0.5">Tunggakan: {formatRupiah(rekapWajibData.totalUnpaidNominal)}</span>
+                  </div>
+                  <div className="p-3 bg-amber-50/60 dark:bg-amber-950/20 rounded-xl border border-amber-200 dark:border-amber-800">
+                    <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">Kepatuhan</span>
+                    <p className="text-lg font-extrabold text-amber-700 dark:text-amber-400 font-mono mt-0.5">
+                      {rekapWajibData.kepatuhanPercent}%
+                    </p>
+                    <div className="w-full bg-slate-200 dark:bg-slate-700 h-1.5 rounded-full mt-1 overflow-hidden">
+                      <div className="bg-emerald-500 h-full rounded-full transition-all" style={{ width: `${rekapWajibData.kepatuhanPercent}%` }} />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Filters Row */}
+                <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2.5 pt-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-bold text-slate-600 dark:text-slate-400 flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5 text-rose-500" />
+                      <span>Periode:</span>
+                    </span>
+                    <input 
+                      type="month"
+                      value={rekapWajibMonth}
+                      onChange={(e) => {
+                        if (e.target.value) setRekapWajibMonth(e.target.value);
+                      }}
+                      className="px-2.5 py-1 text-xs bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-800 dark:text-slate-200 font-bold cursor-pointer font-mono shadow-2xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setRekapWajibMonth(currentRunningMonthYM)}
+                      className={`px-2 py-1 text-xs font-bold rounded-lg border transition cursor-pointer ${
+                        rekapWajibMonth === currentRunningMonthYM 
+                          ? 'bg-rose-600 text-white border-rose-700' 
+                          : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      Bulan Berjalan ({formatYearMonthIndo(currentRunningMonthYM)})
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex bg-slate-200/80 dark:bg-slate-800 p-0.5 rounded-lg text-xs font-bold gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setRekapWajibStatusFilter('belum_bayar')}
+                        className={`px-2 py-1 rounded-md transition cursor-pointer text-xs font-bold ${
+                          rekapWajibStatusFilter === 'belum_bayar'
+                            ? 'bg-rose-600 text-white shadow-2xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-800'
+                        }`}
+                      >
+                        Belum Bayar ({rekapWajibData.unpaidCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRekapWajibStatusFilter('sudah_bayar')}
+                        className={`px-2 py-1 rounded-md transition cursor-pointer text-xs font-bold ${
+                          rekapWajibStatusFilter === 'sudah_bayar'
+                            ? 'bg-emerald-600 text-white shadow-2xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-800'
+                        }`}
+                      >
+                        Sudah Lunas ({rekapWajibData.paidCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRekapWajibStatusFilter('semua')}
+                        className={`px-2 py-1 rounded-md transition cursor-pointer text-xs font-bold ${
+                          rekapWajibStatusFilter === 'semua'
+                            ? 'bg-slate-700 text-white shadow-2xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-800'
+                        }`}
+                      >
+                        Semua ({rekapWajibData.totalMembers})
+                      </button>
+                    </div>
+
+                    <div className="relative min-w-[150px]">
+                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400" />
+                      <input 
+                        type="text"
+                        placeholder="Cari anggota..."
+                        value={rekapWajibSearch}
+                        onChange={(e) => setRekapWajibSearch(e.target.value)}
+                        className="w-full pl-8 pr-3 py-1 text-xs bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-800 dark:text-slate-200"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Rekap Table */}
+              <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-2xs">
+                <div className="overflow-x-auto max-h-[380px]">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 font-semibold border-b border-slate-200 dark:border-slate-700 sticky top-0 bg-white dark:bg-slate-850">
+                      <tr>
+                        <th className="px-3 py-2 w-10 text-center">No</th>
+                        <th className="px-3 py-2 w-28">No. Anggota</th>
+                        <th className="px-3 py-2">Nama Anggota</th>
+                        <th className="px-3 py-2 w-28 text-center">Bulan</th>
+                        <th className="px-3 py-2 w-28 text-center">Status</th>
+                        <th className="px-3 py-2 w-28 text-right">Terbayar</th>
+                        <th className="px-3 py-2 w-28 text-right">Sisa Iuran</th>
+                        <th className="px-3 py-2 w-44 text-center">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-sans">
+                      {filteredRekapWajibRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-4 py-12 text-center text-slate-400 italic">
+                            Tidak ada data anggota yang sesuai dengan filter pilihan ({rekapWajibStatusFilter})
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredRekapWajibRows.map((r, idx) => (
+                          <tr key={r.member.id} className="hover:bg-slate-50 dark:hover:bg-slate-750 transition">
+                            <td className="px-3 py-2 text-center text-slate-400 font-mono">{idx + 1}</td>
+                            <td className="px-3 py-2 font-mono font-bold text-slate-600 dark:text-slate-400">{r.member.noAnggota}</td>
+                            <td className="px-3 py-2">
+                              <p className="font-bold text-slate-800 dark:text-slate-200">{r.member.nama}</p>
+                              {r.member.noHp && <span className="text-[10px] text-slate-400">{r.member.noHp}</span>}
+                            </td>
+                            <td className="px-3 py-2 text-center font-mono font-semibold text-slate-600 dark:text-slate-400">
+                              {formatYearMonthIndo(rekapWajibMonth)}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {r.isPaid ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                                  <Check className="w-2.5 h-2.5" /> Lunas
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                                  <AlertCircle className="w-2.5 h-2.5" /> Belum Bayar
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono text-slate-700 dark:text-slate-300">
+                              {formatRupiah(r.totalPaid)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-bold">
+                              <span className={r.isPaid ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}>
+                                {r.isPaid ? 'Rp 0' : formatRupiah(expectedNominalWajib)}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => setCalendarModalMember(r.member)}
+                                  className="px-2 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded text-[10px] font-bold transition flex items-center gap-1 cursor-pointer border border-slate-250 dark:border-slate-600"
+                                  title="Buka kalender iuran 12 bulan anggota"
+                                >
+                                  <Calendar className="w-3 h-3 text-indigo-600 dark:text-indigo-400" />
+                                  <span>Kalender</span>
+                                </button>
+                                {!r.isPaid ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setAnggotaId(r.member.id);
+                                        setPeriodeBulanWajib(rekapWajibMonth);
+                                        setJumlahWajib(formatInputRupiah(String(expectedNominalWajib)));
+                                        setFormMode('kas_masuk');
+                                      }}
+                                      className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold transition flex items-center gap-1 cursor-pointer shadow-2xs"
+                                      title="Input pembayaran simpanan wajib untuk anggota ini"
+                                    >
+                                      <Wallet className="w-3 h-3" />
+                                      <span>Bayar</span>
+                                    </button>
+                                    {r.member.noHp && (
+                                      <a
+                                        href={`https://wa.me/${r.member.noHp.replace(/\D/g, '').replace(/^0/, '62')}?text=${encodeURIComponent(
+                                          `Halo Bpk/Ibu ${r.member.nama}, kami dari ${setup?.namaKoperasi || 'Koperasi'}. Mengingatkan bahwa iuran Simpanan Wajib Anda untuk periode bulan ${formatYearMonthIndo(rekapWajibMonth)} sebesar ${formatRupiah(expectedNominalWajib)} belum tercatat. Mohon konfirmasi atau melakukan setoran ke koperasi. Terima kasih!`
+                                        )}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 rounded text-[10px] font-bold transition flex items-center gap-1 border border-emerald-200 dark:border-emerald-800"
+                                        title="Kirim pesan pengingat via WhatsApp"
+                                      >
+                                        <MessageSquare className="w-3 h-3 text-emerald-600" />
+                                        <span>WA</span>
+                                      </a>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>Telah Disetor</span>
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           ) : activeTab === 'pembayaran_pending' ? (
             <div className="space-y-4 flex-1 overflow-y-auto max-h-[520px] pr-1">
@@ -4292,6 +5152,30 @@ export function KasMasukView({
                   </select>
                 </div>
 
+                {/* Periode Bulan for Wajib */}
+                {editJenis === 'Wajib' && (
+                  <div className="space-y-1 p-2.5 bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-800/60 rounded-xl">
+                    <label className="text-xs font-semibold text-amber-800 dark:text-amber-300 flex items-center justify-between">
+                      <span className="flex items-center gap-1">
+                        <Calendar className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Bulan Iuran Simpanan Wajib</span>
+                      </span>
+                      <span className="text-[10px] font-bold text-amber-600 font-mono">
+                        {formatYearMonthIndo(editPeriodeBulan)}
+                      </span>
+                    </label>
+                    <input 
+                      type="month"
+                      className="w-full px-3 py-1.5 text-xs bg-white dark:bg-slate-900 border rounded-lg text-slate-800 dark:text-slate-200 border-amber-300 dark:border-amber-700 font-mono font-bold focus:outline-amber-600 cursor-pointer"
+                      value={editPeriodeBulan}
+                      onChange={(e) => {
+                        setEditPeriodeBulan(e.target.value);
+                        setEditBulan(formatYearMonthIndo(e.target.value));
+                      }}
+                    />
+                  </div>
+                )}
+
                 {/* Transaction Type: Setoran / Penarikan */}
                 <div className="space-y-1">
                   <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">TIPE TRANSAKSI</label>
@@ -4422,14 +5306,14 @@ export function KasMasukView({
                       {receiptData.angsuran.angsuranList && receiptData.angsuran.angsuranList.length > 0 ? (
                         <div className="space-y-2">
                           <div className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide flex items-center justify-between">
-                            <span>Pembayaran 2 Bulan Sekaligus:</span>
-                            <span className="text-[9px] bg-emerald-100 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded text-emerald-800 dark:text-emerald-300">2 Transaksi Terpisah</span>
+                            <span>Pembayaran {receiptData.angsuran.angsuranList.length} Bulan Angsuran:</span>
+                            <span className="text-[9px] bg-emerald-100 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded text-emerald-800 dark:text-emerald-300">{receiptData.angsuran.angsuranList.length} Transaksi Terpisah</span>
                           </div>
                           {receiptData.angsuran.angsuranList.map((sub, sIdx) => (
                             <div key={`sub-ang-${sIdx}`} className="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-800 space-y-1">
                               <div className="flex justify-between items-center">
                                 <span className="font-bold text-indigo-700 dark:text-indigo-400">
-                                  Angsuran Ke-{sub.bulanKe} {sIdx === 0 ? '(Tunggakan Kemarin)' : '(Bulan Berjalan)'}
+                                  Angsuran Ke-{sub.bulanKe} [{sIdx + 1}/{receiptData.angsuran.angsuranList.length}]
                                 </span>
                                 <span className="font-mono font-bold text-indigo-700 dark:text-indigo-400">
                                   {formatRupiah(sub.jumlahBayar)}
@@ -4964,6 +5848,74 @@ export function KasMasukView({
                   type="button"
                   onClick={() => setPreviewBuktiModal(null)}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer"
+                >
+                  Tutup
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL KALENDER SIMPANAN WAJIB ANGGOTA */}
+      <AnimatePresence>
+        {calendarModalMember && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-2xl shadow-xl overflow-hidden border border-slate-200 dark:border-slate-800 p-6 space-y-4"
+            >
+              <div className="flex items-center justify-between border-b border-slate-150 dark:border-slate-800 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 flex items-center justify-center font-bold">
+                    <Calendar className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100">
+                      Kalender Iuran Simpanan Wajib
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {calendarModalMember.nama} ({calendarModalMember.noAnggota})
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCalendarModalMember(null)}
+                  className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <KalenderSimpananWajib
+                memberId={calendarModalMember.id}
+                memberNama={calendarModalMember.nama}
+                memberNoAnggota={calendarModalMember.noAnggota}
+                simpananList={simpanan}
+                nominalWajib={setup?.nominalSimpananWajib || 50000}
+                selectedMonthYM={rekapWajibMonth}
+                onSelectMonths={(months) => {
+                  if (months.length > 0) {
+                    setAnggotaId(calendarModalMember.id);
+                    handleSelectMonthsWajib(months);
+                    setCalendarModalMember(null);
+                    setActiveTab('simpanan');
+                    setFormMode('kas_masuk');
+                  }
+                }}
+              />
+
+              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
+                <span className="text-slate-400 text-[11px]">
+                  💡 Klik salah satu kotak bulan untuk langsung membayar di Kas Masuk
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCalendarModalMember(null)}
+                  className="px-4 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold rounded-lg cursor-pointer transition self-end sm:self-auto"
                 >
                   Tutup
                 </button>

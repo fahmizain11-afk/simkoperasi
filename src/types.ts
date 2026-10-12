@@ -5,6 +5,7 @@ export interface Member {
   alamat: string;
   noHp: string;
   tanggalBergabung: string;
+  nik?: string;
   jenisKelamin?: 'Laki-laki' | 'Perempuan';
   isVerified?: boolean; // true = active member, false/undefined = pending verification
   tempatLahir?: string;
@@ -51,6 +52,14 @@ export interface KoperasiSetup {
   modalAwal?: number;
   danaCadanganAwal?: number;
   shuAwal?: number;
+
+  // Parameter Distribusi SHU (JMA & JUA)
+  shuPersenJMA?: number;
+  shuIncludeSukarelaInJMA?: boolean;
+  shuIncludeJasaPinjamanInJUA?: boolean; // Unit Jasa (Bunga Pinjaman SP)
+  shuIncludeWarungInJUA?: boolean;       // Unit Warung (Toko Koperasi)
+  shuIncludeSukarelaInJUA?: boolean;     // Simpanan Sukarela (Tabungan Manasuka)
+  shuIncludeProvisiInJUA?: boolean;      // Unit Provisi (Administrasi Akad Pinjaman)
 }
 
 export interface Simpanan {
@@ -61,6 +70,8 @@ export interface Simpanan {
   jumlah: number;
   keterangan: string;
   transaksiId?: string; // Groups multiple savings in a single receipt
+  periodeBulan?: string; // Periode bulan buku simpanan wajib, format "YYYY-MM" (contoh: "2026-09")
+  bulan?: string; // Nama bulan & tahun simpanan wajib (contoh: "September 2026")
 }
 
 export interface Pinjaman {

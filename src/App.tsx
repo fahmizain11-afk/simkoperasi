@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { sortMembersNaturally, calculateLoanOutstanding, calculateAngsuranPrincipal, calculateAngsuranInterest, calculateKasKoperasi } from './utils/finance';
+import { sortMembersNaturally, calculateLoanOutstanding, calculateAngsuranPrincipal, calculateAngsuranInterest, calculateKasKoperasi, formatYearMonthIndo } from './utils/finance';
 import { Member, Simpanan, Pinjaman, Angsuran, PendapatanLain, BebanKoperasi, KoperasiSetup, ManasukaBungaLog, Pembelian, PiutangWarung, Pengumuman, PengajuanPinjaman, WarungBarang, PengurusPengawas, GaleriKoperasi, RekeningNeraca, PembayaranPending, UserAccount, SecurityLog, ItemAnggaranRAPBK, RAPBKSetting, WhatsAppLog, SHUDistribution } from './types';
 import { initialMembers, initialSimpanan, initialPinjaman, initialAngsuran, initialPendapatan, initialBeban, initialSetup, initialPembelian, initialPiutangWarung, initialAnnouncements, initialPengajuanPinjaman, initialWarungBarang, initialPengurusPengawas, initialGaleriKoperasi, initialRekeningNeraca, initialPembayaranPending, initialUserAccounts, initialSecurityLogs, initialRAPBKSettings, initialAnggaranRAPBK, initialWhatsAppLogs } from './dummyData';
 import { 
@@ -40,7 +40,7 @@ import {
   Building, LayoutDashboard, Users, Wallet, HandCoins, CheckCircle2, 
   TrendingUp, TrendingDown, Scale, Sun, Moon, LogOut, HeartHandshake, UserCog, Menu, X, ShoppingCart, Lock, Bell, Megaphone,
   Eye, EyeOff, Store, Image as ImageIcon, KeyRound, ShieldCheck, Calculator, Search, LogIn, Globe, Target,
-  FileSpreadsheet
+  FileSpreadsheet, CreditCard
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -724,7 +724,7 @@ export default function App() {
   }, []);
 
   // Kas Masuk deep link states
-  const [kasMasukInitialTab, setKasMasukInitialTab] = useState<'simpanan' | 'angsuran' | 'pembayaran_pending'>('simpanan');
+  const [kasMasukInitialTab, setKasMasukInitialTab] = useState<'simpanan' | 'angsuran' | 'pembayaran_pending' | 'pendapatan' | 'rekap_bulanan' | 'rekap_wajib'>('simpanan');
   const [kasMasukInitialSearch, setKasMasukInitialSearch] = useState<string>('');
   const [kasMasukInitialAnggota, setKasMasukInitialAnggota] = useState<string>('');
 
@@ -746,6 +746,24 @@ export default function App() {
     }
     if (memberId) {
       setKasMasukInitialAnggota(memberId);
+    }
+    navigate('/kasmasuk');
+  };
+
+  const handleNavigateToSimpanan = (memberId?: string, query?: string, initialTab: 'simpanan' | 'rekap_wajib' = 'simpanan') => {
+    setKasMasukInitialTab(initialTab as any);
+    if (query) {
+      setKasMasukInitialSearch(query);
+    } else if (memberId) {
+      const mem = sortedMembers.find(m => m.id === memberId);
+      if (mem) {
+        setKasMasukInitialSearch(mem.nama);
+      }
+    }
+    if (memberId) {
+      setKasMasukInitialAnggota(memberId);
+    } else {
+      setKasMasukInitialAnggota('');
     }
     navigate('/kasmasuk');
   };
@@ -872,7 +890,24 @@ export default function App() {
   const [pendingTab, setPendingTab] = useState<TabId | null>(null);
 
   const handleNavigation = (tabId: TabId, subTab?: string, filterAnggota?: string) => {
-    if (userRole === 'karyawan_warung' && tabId !== 'kasmasuk' && tabId !== 'kaskeluar' && tabId !== 'warung') {
+    if (userRole === 'karyawan_warung') {
+      if (tabId === 'kasmasuk') {
+        // User kasir tidak diperkenankan membuka submenu setoran anggota, hanya bisa entri pendapatan kas
+        setKasMasukInitialTab('pendapatan');
+        navigate('/kasmasuk');
+        return;
+      }
+      if (tabId === 'kaskeluar') {
+        // Kas keluar hanya bisa mengakses biaya beban
+        setKasKeluarInitialTab('beban');
+        navigate('/kaskeluar');
+        return;
+      }
+      if (tabId === 'warung') {
+        navigate('/warung');
+        return;
+      }
+      // Menu lain tidak diizinkan untuk kasir warung
       navigate('/warung');
       return;
     }
@@ -927,13 +962,21 @@ export default function App() {
 
   // Enforce role restrictions for karyawan_warung & pengawas
   useEffect(() => {
-    if (userRole === 'karyawan_warung' && activeTab !== 'kasmasuk' && activeTab !== 'kaskeluar' && activeTab !== 'warung') {
-      navigate('/warung');
+    if (userRole === 'karyawan_warung') {
+      if (activeTab !== 'kasmasuk' && activeTab !== 'kaskeluar' && activeTab !== 'warung') {
+        navigate('/warung');
+      }
+      if (activeTab === 'kasmasuk' && kasMasukInitialTab !== 'pendapatan') {
+        setKasMasukInitialTab('pendapatan');
+      }
+      if (activeTab === 'kaskeluar' && kasKeluarInitialTab !== 'beban') {
+        setKasKeluarInitialTab('beban');
+      }
     }
     if (userRole === 'pengawas' && activeTab !== 'dashboard' && activeTab !== 'laporan') {
       navigate('/admin');
     }
-  }, [userRole, activeTab]);
+  }, [userRole, activeTab, kasMasukInitialTab, kasKeluarInitialTab]);
 
   // Mutators for warung_barang
   const handleAddBarang = async (newB: Omit<WarungBarang, 'id'>) => {
@@ -1445,13 +1488,16 @@ export default function App() {
 
     // Process actual ledger entry based on payment type outside the state setter
     const txId = `TX-${p.id}`;
+    const ymWajib = p.tanggal ? p.tanggal.substring(0, 7) : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     if (p.jenis === 'Simpanan Wajib') {
       await handleAddSimpanan({
         anggotaId: p.anggotaId,
         tanggal: p.tanggal,
         jenis: 'Wajib',
         jumlah: p.jumlah,
-        keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri divalidasi',
+        periodeBulan: ymWajib,
+        bulan: formatYearMonthIndo(ymWajib),
+        keterangan: p.keterangan || `Setoran Simpanan Wajib ${formatYearMonthIndo(ymWajib)} mandiri divalidasi`,
         transaksiId: txId
       });
     } else if (p.jenis === 'Angsuran') {
@@ -1527,7 +1573,9 @@ export default function App() {
           tanggal: p.tanggal,
           jenis: 'Wajib',
           jumlah: p.jumlahSimpananWajib,
-          keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri (gabungan) divalidasi',
+          periodeBulan: ymWajib,
+          bulan: formatYearMonthIndo(ymWajib),
+          keterangan: p.keterangan || `Setoran Simpanan Wajib ${formatYearMonthIndo(ymWajib)} mandiri (gabungan) divalidasi`,
           transaksiId: txId
         });
       }
@@ -1617,7 +1665,9 @@ export default function App() {
           tanggal: p.tanggal,
           jenis: 'Wajib',
           jumlah: p.jumlahSimpananWajib,
-          keterangan: p.keterangan || 'Setoran Simpanan Wajib mandiri (gabungan Pokok+Wajib) divalidasi',
+          periodeBulan: ymWajib,
+          bulan: formatYearMonthIndo(ymWajib),
+          keterangan: p.keterangan || `Setoran Simpanan Wajib ${formatYearMonthIndo(ymWajib)} mandiri (gabungan Pokok+Wajib) divalidasi`,
           transaksiId: txId
         });
       }
@@ -2650,12 +2700,24 @@ export default function App() {
 
             {/* Quick Actions */}
             {userRole === 'karyawan_warung' ? (
-              <button 
-                onClick={() => handleNavigation('kaskeluar')}
-                className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg shadow-xs transition cursor-pointer active:scale-95"
-              >
-                <span>+ Kas Keluar</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={() => handleNavigation('kasmasuk', 'pendapatan')}
+                  className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg shadow-xs transition cursor-pointer active:scale-95"
+                  title="Entri Pendapatan Kas Masuk"
+                >
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  <span>+ Pendapatan Kas</span>
+                </button>
+                <button 
+                  onClick={() => handleNavigation('kaskeluar', 'beban')}
+                  className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg shadow-xs transition cursor-pointer active:scale-95"
+                  title="Catat Biaya & Beban Operasional"
+                >
+                  <CreditCard className="w-3.5 h-3.5" />
+                  <span>+ Biaya Beban</span>
+                </button>
+              </div>
             ) : userRole === 'pengawas' ? (
               <div className="hidden sm:flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-lg">
                 <ShieldCheck className="w-3.5 h-3.5" />
@@ -3116,43 +3178,51 @@ export default function App() {
             onEditSimpanan={handleEditSimpanan}
             onEditAngsuran={handleEditAngsuran}
             availableCash={availableCash}
-            initialActiveTab={kasMasukInitialTab}
+            initialActiveTab={userRole === 'karyawan_warung' ? 'pendapatan' : kasMasukInitialTab}
             initialSearchTerm={kasMasukInitialSearch}
             initialAnggotaId={kasMasukInitialAnggota}
             onNavigateToPinjaman={handleNavigateToPinjaman}
             isDarkMode={isDarkMode}
+            userRole={userRole}
           />,
           'kasmasuk'
         )}
       />
       <Route
         path="/simpanan"
-        element={renderAdminLayout(
-          <KasMasukView 
-            setup={setup}
-            members={sortedMembers} simpanan={simpanan} pinjaman={pinjaman} angsuran={angsuran}
-            income={income}
-            onAddIncome={handleAddIncome}
-            onDeleteIncome={handleDeleteIncome}
-            pembayaranPending={pembayaranPending}
-            onApprovePembayaranPending={handleApprovePembayaranPending}
-            onRejectPembayaranPending={handleRejectPembayaranPending}
-            onAddSimpanan={handleAddSimpanan}
-            onPostManasukaBunga={handlePostManasukaBunga}
-            onAddAngsuran={handleAddAngsuran}
-            onDeleteAngsuran={handleDeleteAngsuran}
-            onDeleteSimpanan={handleDeleteSimpanan}
-            onEditSimpanan={handleEditSimpanan}
-            onEditAngsuran={handleEditAngsuran}
-            availableCash={availableCash}
-            initialActiveTab={'simpanan'}
-            initialSearchTerm={kasMasukInitialSearch}
-            initialAnggotaId={kasMasukInitialAnggota}
-            onNavigateToPinjaman={handleNavigateToPinjaman}
-            isDarkMode={isDarkMode}
-          />,
-          'kasmasuk'
-        )}
+        element={
+          userRole === 'karyawan_warung' ? (
+            <Navigate to="/kasmasuk" replace />
+          ) : (
+            renderAdminLayout(
+              <KasMasukView 
+                setup={setup}
+                members={sortedMembers} simpanan={simpanan} pinjaman={pinjaman} angsuran={angsuran}
+                income={income}
+                onAddIncome={handleAddIncome}
+                onDeleteIncome={handleDeleteIncome}
+                pembayaranPending={pembayaranPending}
+                onApprovePembayaranPending={handleApprovePembayaranPending}
+                onRejectPembayaranPending={handleRejectPembayaranPending}
+                onAddSimpanan={handleAddSimpanan}
+                onPostManasukaBunga={handlePostManasukaBunga}
+                onAddAngsuran={handleAddAngsuran}
+                onDeleteAngsuran={handleDeleteAngsuran}
+                onDeleteSimpanan={handleDeleteSimpanan}
+                onEditSimpanan={handleEditSimpanan}
+                onEditAngsuran={handleEditAngsuran}
+                availableCash={availableCash}
+                initialActiveTab={'simpanan'}
+                initialSearchTerm={kasMasukInitialSearch}
+                initialAnggotaId={kasMasukInitialAnggota}
+                onNavigateToPinjaman={handleNavigateToPinjaman}
+                isDarkMode={isDarkMode}
+                userRole={userRole}
+              />,
+              'kasmasuk'
+            )
+          )
+        }
       />
 
       {/* Kas Keluar */}
@@ -3181,12 +3251,15 @@ export default function App() {
             onAddPembelian={handleAddPembelian}
             onDeletePembelian={handleDeletePembelian}
             availableCash={availableCash}
-            initialActiveTab={kasKeluarInitialTab}
+            initialActiveTab={userRole === 'karyawan_warung' ? 'beban' : kasKeluarInitialTab}
             initialLoanSearchTerm={pinjamanInitialSearch}
             initialLoanAnggotaId={pinjamanInitialAnggota}
             initialLoanId={pinjamanInitialId}
             onNavigateToAngsuran={handleNavigateToAngsuran}
             isDarkMode={isDarkMode}
+            userRole={userRole}
+            shuDistributions={shuDistributions}
+            onAddSHUDistribution={handleAddSHUDistribution}
           />,
           'kaskeluar'
         )}
@@ -3293,6 +3366,7 @@ export default function App() {
             onEditAngsuran={handleEditAngsuran}
             onUpdateSetup={handleUpdateSetup}
             onNavigateToAngsuran={handleNavigateToAngsuran}
+            onNavigateToSimpanan={handleNavigateToSimpanan}
             onNavigateToPinjaman={handleNavigateToPinjaman}
             userRole={userRole}
             shuDistributions={shuDistributions}

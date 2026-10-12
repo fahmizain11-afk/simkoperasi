@@ -33,6 +33,14 @@ export const initialSetup: KoperasiSetup = {
   modalAwal: 0,
   danaCadanganAwal: 0,
 
+  // Parameter Distribusi SHU (JMA & JUA)
+  shuPersenJMA: 50,
+  shuIncludeSukarelaInJMA: true,
+  shuIncludeJasaPinjamanInJUA: true, // Unit Jasa (Bunga Pinjaman SP)
+  shuIncludeWarungInJUA: false,       // Unit Warung (Default tidak dimasukkan sesuai instruksi)
+  shuIncludeSukarelaInJUA: false,     // Simpanan Sukarela dalam JUA (Opsional)
+  shuIncludeProvisiInJUA: false,      // Unit Provisi (Opsional)
+
   // Default custom text values
   kataPembuka: "Selamat datang di website resmi Koperasi Dana Segar. Kami memadukan prinsip luhur kekeluargaan dengan teknologi digital terintegrasi untuk mendukung kesejahteraan seluruh anggota dan kemandirian usaha komunitas.",
   visi: "Menjadi lembaga keuangan mikro koperasi terpercaya, mandiri, unggul dalam pelayanan, dan berorientasi penuh pada pemberdayaan potensi ekonomi seluruh anggota koperasi.",

@@ -11,6 +11,8 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { CameraBarcodeScannerModal } from './CameraBarcodeScannerModal';
 import { CetakLabelRakModal } from './CetakLabelRakModal';
+import { DigitalMemberCardModal } from './DigitalMemberCardModal';
+import { parseMemberScanCode } from '../utils/memberCard';
 
 export interface POSCartItem {
   id: string; // warungBarang id or 'custom-' + timestamp
@@ -104,6 +106,8 @@ export function WarungPOSView({
   const [activeReceipt, setActiveReceipt] = useState<POSTransactionReceipt | null>(null);
   const [showCustomItemModal, setShowCustomItemModal] = useState(false);
   const [showCameraScanner, setShowCameraScanner] = useState(false);
+  const [showMemberScannerModal, setShowMemberScannerModal] = useState(false);
+  const [showMemberCardModal, setShowMemberCardModal] = useState(false);
   const [showLabelRakModal, setShowLabelRakModal] = useState(false);
   const [customNama, setCustomNama] = useState('');
   const [customHarga, setCustomHarga] = useState('');
@@ -476,13 +480,29 @@ export function WarungPOSView({
     }
   };
 
+  // Helper to detect if a barcode/QR string is a Member Card
+  const checkIsMemberCode = (code: string): Member | null => {
+    return parseMemberScanCode(code, members);
+  };
+
   // Quick Barcode Scan simulator
   const handleBarcodeSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const query = barcodeInput.trim();
     if (!query) return;
 
-    // Find by exact kodeBarang or close name match
+    // 1. Check if scanned barcode is a Member Card QR / Barcode
+    const memberMatched = checkIsMemberCode(query);
+    if (memberMatched) {
+      setCustomerType('anggota');
+      setSelectedMemberId(memberMatched.id);
+      setBarcodeInput('');
+      setBarcodeScanFeedback(`✓ Kartu Anggota Terdeteksi: ${memberMatched.nama} (${memberMatched.noAnggota})`);
+      setTimeout(() => setBarcodeScanFeedback(null), 3500);
+      return;
+    }
+
+    // 2. Find by exact kodeBarang or close name match in product catalog
     const found = warungBarang.find(b => 
       (b.kodeBarang && b.kodeBarang.toLowerCase() === query.toLowerCase()) ||
       b.namaBarang.toLowerCase() === query.toLowerCase()
@@ -494,13 +514,24 @@ export function WarungPOSView({
       setTimeout(() => setBarcodeScanFeedback(null), 2500);
       setBarcodeInput('');
     } else {
-      setBarcodeScanFeedback(`⚠️ Produk dengan kode/nama "${query}" tidak ditemukan.`);
+      setBarcodeScanFeedback(`⚠️ Produk / Kartu dengan kode "${query}" tidak ditemukan.`);
       setTimeout(() => setBarcodeScanFeedback(null), 3000);
     }
   };
 
   // Camera Barcode Scan handler
   const handleCameraScan = (barcode: string, matched?: WarungBarang) => {
+    // 1. Check if scanned barcode is a Member Card QR / Barcode
+    const memberMatched = checkIsMemberCode(barcode);
+    if (memberMatched) {
+      setCustomerType('anggota');
+      setSelectedMemberId(memberMatched.id);
+      setBarcodeScanFeedback(`✓ Kartu Anggota Terdeteksi: ${memberMatched.nama} (${memberMatched.noAnggota})`);
+      setTimeout(() => setBarcodeScanFeedback(null), 3500);
+      return;
+    }
+
+    // 2. Otherwise match product in catalog
     const found = matched || warungBarang.find(b => 
       (b.kodeBarang && b.kodeBarang.trim().toLowerCase() === barcode.trim().toLowerCase()) ||
       b.namaBarang.toLowerCase() === barcode.trim().toLowerCase()
@@ -511,7 +542,7 @@ export function WarungPOSView({
       setBarcodeScanFeedback(`✓ Berhasil scan: ${found.namaBarang}`);
       setTimeout(() => setBarcodeScanFeedback(null), 3000);
     } else {
-      setBarcodeScanFeedback(`⚠️ Barcode "${barcode}" belum terdaftar di katalog warung.`);
+      setBarcodeScanFeedback(`⚠️ Barcode "${barcode}" belum terdaftar di katalog warung / anggota.`);
       setTimeout(() => setBarcodeScanFeedback(null), 3500);
     }
   };
@@ -1032,31 +1063,43 @@ export function WarungPOSView({
               )}
             </div>
 
-            {/* Customer Type Segmented Control */}
-            <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-200/60 dark:bg-slate-800 rounded-xl">
+            {/* Customer Type Segmented Control with Quick Member Card Scan */}
+            <div className="flex items-center gap-1.5">
+              <div className="flex-1 grid grid-cols-2 gap-1 p-1 bg-slate-200/60 dark:bg-slate-800 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setCustomerType('umum')}
+                  className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    customerType === 'umum'
+                      ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  <DollarSign className="w-3.5 h-3.5" />
+                  <span>Umum</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCustomerType('anggota')}
+                  className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    customerType === 'anggota'
+                      ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  <UserCheck className="w-3.5 h-3.5" />
+                  <span>Anggota</span>
+                </button>
+              </div>
+
               <button
                 type="button"
-                onClick={() => setCustomerType('umum')}
-                className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
-                  customerType === 'umum'
-                    ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
-                }`}
+                onClick={() => setShowMemberScannerModal(true)}
+                className="px-2.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow-xs active:scale-95 shrink-0"
+                title="Scan QR Code / Barcode Kartu Anggota Digital"
               >
-                <DollarSign className="w-3.5 h-3.5" />
-                <span>Pembeli Umum</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setCustomerType('anggota')}
-                className={`py-1.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
-                  customerType === 'anggota'
-                    ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
-                }`}
-              >
-                <UserCheck className="w-3.5 h-3.5" />
-                <span>Anggota Koperasi</span>
+                <QrCode className="w-4 h-4 text-emerald-100" />
+                <span className="hidden sm:inline">Scan KTA</span>
               </button>
             </div>
 
@@ -1111,6 +1154,16 @@ export function WarungPOSView({
                           ⭐ {memberAccumulatedPoints} Poin
                         </span>
                       )}
+
+                      <button
+                        type="button"
+                        onClick={() => setShowMemberCardModal(true)}
+                        className="px-2 py-0.5 bg-teal-600 hover:bg-teal-500 text-white rounded text-[10px] font-bold flex items-center gap-1 transition cursor-pointer"
+                        title="Lihat & Cetak Kartu Anggota Digital pembeli ini"
+                      >
+                        <CreditCard className="w-2.5 h-2.5" />
+                        <span>KTA</span>
+                      </button>
 
                       <button
                         type="button"
@@ -1932,7 +1985,7 @@ export function WarungPOSView({
         )}
       </AnimatePresence>
 
-      {/* MODAL: Camera Barcode Scanner */}
+      {/* MODAL: Camera Barcode Scanner Produk */}
       <CameraBarcodeScannerModal
         isOpen={showCameraScanner}
         onClose={() => setShowCameraScanner(false)}
@@ -1943,6 +1996,38 @@ export function WarungPOSView({
           onOpenCatalogTab();
         } : undefined}
       />
+
+      {/* MODAL: Camera Barcode Scanner Khusus Kartu Anggota */}
+      <CameraBarcodeScannerModal
+        isOpen={showMemberScannerModal}
+        onClose={() => setShowMemberScannerModal(false)}
+        title="Scan Kartu Anggota Digital"
+        subtitle="Arahkan kamera ke QR Code atau Barcode pada kartu anggota di layar HP atau kartu fisik pembeli"
+        onScan={(scannedCode) => {
+          const mem = checkIsMemberCode(scannedCode);
+          if (mem) {
+            setCustomerType('anggota');
+            setSelectedMemberId(mem.id);
+            setBarcodeScanFeedback(`✓ Kartu Anggota Terdeteksi: ${mem.nama} (${mem.noAnggota})`);
+            setTimeout(() => setBarcodeScanFeedback(null), 3500);
+            setShowMemberScannerModal(false);
+          } else {
+            setBarcodeScanFeedback(`⚠️ Kode "${scannedCode}" bukan kode anggota terdaftar.`);
+            setTimeout(() => setBarcodeScanFeedback(null), 3500);
+          }
+        }}
+      />
+
+      {/* MODAL: Pratinjau & Unduh Kartu Anggota Digital dari POS */}
+      {showMemberCardModal && selectedMember && (
+        <DigitalMemberCardModal
+          isOpen={showMemberCardModal}
+          onClose={() => setShowMemberCardModal(false)}
+          member={selectedMember}
+          allMembers={members}
+          setup={setup}
+        />
+      )}
 
       {/* MODAL: Cetak Label Rak & Barcode Produk */}
       <CetakLabelRakModal

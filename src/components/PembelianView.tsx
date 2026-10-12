@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Pembelian, KoperasiSetup } from '../types';
 import { formatRupiah } from '../utils/finance';
 import { 
-  ShoppingCart, Plus, Trash2, Calendar, Tag, FileText, Search
+  ShoppingCart, Plus, Trash2, Calendar, Tag, FileText, Search, Boxes, Package
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
@@ -92,20 +92,26 @@ export function PembelianView({
 
   return (
     <div className="space-y-6">
-      {/* Header Panel */}
-      <div className="bg-gradient-to-r from-emerald-850 to-teal-900 text-white p-6 rounded-3xl border border-emerald-800 shadow-md">
+      {/* Title Header area */}
+      <div className="bg-gradient-to-r from-emerald-800 to-teal-950 text-white p-6 rounded-3xl border border-emerald-800 shadow-md">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
-            <span className="p-3 bg-white/10 backdrop-blur-md rounded-2xl"><ShoppingCart className="w-6 h-6 text-white"/></span>
+            <span className="p-3 bg-white/10 backdrop-blur-md rounded-2xl"><Boxes className="w-6 h-6 text-white"/></span>
             <div>
-              <h2 className="text-xl font-bold tracking-tight">Inventaris & Pembelian Aset</h2>
-              <p className="text-xs text-emerald-100 mt-1">Kelola perolehan persediaan, aset inventaris, serta catatan pembelanjaan barang modal.</p>
+              <h2 className="text-xl font-bold tracking-tight">Inventaris & Pembelian Aset Koperasi</h2>
+              <p className="text-xs text-emerald-100 mt-1">
+                Kelola perolehan persediaan, aset inventaris kantor, peralatan operasional, serta catatan pembelanjaan barang modal.
+              </p>
             </div>
           </div>
-          <div className="flex gap-2">
-            <div className="bg-white/10 backdrop-blur-md px-4 py-2 rounded-xl text-center min-w-[150px]">
-              <span className="text-[10px] text-emerald-200 block uppercase font-mono">Total Pengadaan</span>
-              <span className="text-sm font-bold font-mono">{formatRupiah(totalPembelianSum)}</span>
+          <div className="flex flex-wrap sm:flex-nowrap gap-2 items-center">
+            <div className="bg-white/10 backdrop-blur-md px-3.5 py-2 rounded-xl text-center min-w-[100px]">
+              <span className="text-[10px] text-emerald-200 block uppercase font-mono">Total Aset</span>
+              <span className="text-sm font-bold font-mono">{pembelian.length} Item</span>
+            </div>
+            <div className="bg-white/10 backdrop-blur-md px-3.5 py-2 rounded-xl text-center min-w-[125px]">
+              <span className="text-[10px] text-emerald-250 block uppercase font-mono">Total Pengadaan</span>
+              <span className="text-sm font-bold font-mono text-amber-200">{formatRupiah(totalPembelianSum)}</span>
             </div>
           </div>
         </div>

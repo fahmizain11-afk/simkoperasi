@@ -51,7 +51,9 @@
         "jenis": { "type": "string", "enum": ["Pokok", "Wajib", "Sukarela"] },
         "jumlah": { "type": "number" },
         "keterangan": { "type": "string" },
-        "transaksiId": { "type": "string" }
+        "transaksiId": { "type": "string" },
+        "periodeBulan": { "type": "string" },
+        "bulan": { "type": "string" }
       },
       "required": ["id", "anggotaId", "tanggal", "jenis", "jumlah"]
     },

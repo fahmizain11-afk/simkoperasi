@@ -10,7 +10,7 @@ import {
   Database, Wifi, WifiOff, CloudUpload, CloudDownload, CheckCircle, AlertTriangle,
   Eye, EyeOff, ExternalLink, Search, ArrowUpDown, ArrowUp, ArrowDown, Filter,
   CalendarDays, FileSpreadsheet, Layers, PieChart, BarChart3, ChevronDown, Check,
-  Activity, Percent, Clock, Users
+  Activity, Percent, Clock, Users, ShoppingBag, CheckCircle2, AlertCircle, Info, Coins
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { AdminPengurusView } from './AdminPengurusView';
@@ -235,6 +235,14 @@ export function ProfilKoperasiView({
   const [nominalSimpananWajib, setNominalSimpananWajib] = useState<number>(setup.nominalSimpananWajib ?? 50000);
   const [jamOperasional, setJamOperasional] = useState<string>(setup.jamOperasional || "Senin - Jumat (08.00 - 16.00 WIB), Sabtu (08.00 - 12.00 WIB)");
 
+  // SHU JUA Revenue Sources Settings
+  const [shuPersenJMA, setShuPersenJMA] = useState<number>(setup.shuPersenJMA ?? 50);
+  const [shuIncludeSukarelaInJMA, setShuIncludeSukarelaInJMA] = useState<boolean>(setup.shuIncludeSukarelaInJMA ?? true);
+  const [shuIncludeJasaPinjamanInJUA, setShuIncludeJasaPinjamanInJUA] = useState<boolean>(setup.shuIncludeJasaPinjamanInJUA ?? true);
+  const [shuIncludeWarungInJUA, setShuIncludeWarungInJUA] = useState<boolean>(setup.shuIncludeWarungInJUA ?? false);
+  const [shuIncludeSukarelaInJUA, setShuIncludeSukarelaInJUA] = useState<boolean>(setup.shuIncludeSukarelaInJUA ?? false);
+  const [shuIncludeProvisiInJUA, setShuIncludeProvisiInJUA] = useState<boolean>(setup.shuIncludeProvisiInJUA ?? false);
+
   // Setup Awal Neraca states
   const [kasAwal, setKasAwal] = useState<number>(setup.kasAwal ?? 0);
   const [piutangAwal, setPiutangAwal] = useState<number>(setup.piutangAwal ?? 0);
@@ -260,6 +268,12 @@ export function ProfilKoperasiView({
     setSimpananSukarelaAwal(setup.simpananSukarelaAwal ?? 0);
     setModalAwalForm(setup.modalAwal ?? 0);
     setDanaCadanganAwal(setup.danaCadanganAwal ?? 0);
+    setShuPersenJMA(setup.shuPersenJMA ?? 50);
+    setShuIncludeSukarelaInJMA(setup.shuIncludeSukarelaInJMA ?? true);
+    setShuIncludeJasaPinjamanInJUA(setup.shuIncludeJasaPinjamanInJUA ?? true);
+    setShuIncludeWarungInJUA(setup.shuIncludeWarungInJUA ?? false);
+    setShuIncludeSukarelaInJUA(setup.shuIncludeSukarelaInJUA ?? false);
+    setShuIncludeProvisiInJUA(setup.shuIncludeProvisiInJUA ?? false);
   }, [setup]);
 
   const totalAktivaAwal = kasAwal + piutangAwal + piutangWarungAwal + persediaanWarungAwal + (inventarisAwal - akumulasiPenyusutanAwal);
@@ -390,6 +404,7 @@ export function ProfilKoperasiView({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onUpdateSetup({
+      ...setup,
       namaKoperasi: namaKop,
       slogan: sloganKop,
       alamatKantor: alamatKop,
@@ -417,7 +432,14 @@ export function ProfilKoperasiView({
       danaCadanganAwal: parseFloat(danaCadanganAwal as any) || 0,
       kataPembuka: kataPembuka,
       visi: visi,
-      misi: misiRaw.split('\n').map(line => line.trim()).filter(line => line.length > 0)
+      misi: misiRaw.split('\n').map(line => line.trim()).filter(line => line.length > 0),
+      // Parameter Distribusi SHU (JMA & JUA)
+      shuPersenJMA,
+      shuIncludeSukarelaInJMA,
+      shuIncludeJasaPinjamanInJUA,
+      shuIncludeWarungInJUA,
+      shuIncludeSukarelaInJUA,
+      shuIncludeProvisiInJUA
     });
     setSavedNotif(true);
     setTimeout(() => setSavedNotif(false), 3000);
@@ -1068,6 +1090,150 @@ export function ProfilKoperasiView({
                   <span className="absolute right-3 top-2.5 text-xs text-slate-450 font-bold">% / bln</span>
                 </div>
                 <p className="text-[10px] text-slate-400">Suku bunga bulanan dividen manasuka.</p>
+              </div>
+            </div>
+
+            {/* PENGATURAN SUMBER PENDAPATAN JASA USAHA ANGGOTA (JUA) DISTRIBUSI SHU */}
+            <div className="pt-5 border-t border-slate-150 dark:border-slate-700 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                <div>
+                  <h5 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                    <ShoppingBag className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                    <span>Sumber Pendapatan untuk Jasa Usaha Anggota (JUA) Distribusi SHU</span>
+                  </h5>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    Pilih unit/sumber pendapatan yang masuk ke dalam perhitungan pembagian JUA. Sistem distribusi SHU hanya akan menghitung partisipasi anggota dari sumber yang dicentang.
+                  </p>
+                </div>
+                <span className="text-[10px] font-mono font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded-full border border-indigo-200 dark:border-indigo-800 self-start sm:self-auto">
+                  Distribusi SHU
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+                {/* 1. Unit Jasa (Simpan Pinjam) */}
+                <div className={`p-3.5 rounded-xl border transition-all ${
+                  shuIncludeJasaPinjamanInJUA
+                    ? 'bg-indigo-50/70 dark:bg-indigo-950/30 border-indigo-300 dark:border-indigo-800 shadow-2xs'
+                    : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 opacity-70'
+                }`}>
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shuIncludeJasaPinjamanInJUA}
+                      onChange={(e) => setShuIncludeJasaPinjamanInJUA(e.target.checked)}
+                      className="mt-1 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-slate-900 dark:text-white block">
+                        Unit Jasa (Bunga Pinjaman SP)
+                      </span>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        Jasa bunga pinjaman/kredit yang telah disetor anggota melalui angsuran.
+                      </p>
+                      <span className={`inline-block mt-2 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        shuIncludeJasaPinjamanInJUA
+                          ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-300'
+                          : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                      }`}>
+                        {shuIncludeJasaPinjamanInJUA ? '✓ Dihitung ke JUA' : '• Dikecualikan'}
+                      </span>
+                    </div>
+                  </label>
+                </div>
+
+                {/* 2. Unit Warung */}
+                <div className={`p-3.5 rounded-xl border transition-all ${
+                  shuIncludeWarungInJUA
+                    ? 'bg-indigo-50/70 dark:bg-indigo-950/30 border-indigo-300 dark:border-indigo-800 shadow-2xs'
+                    : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                }`}>
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shuIncludeWarungInJUA}
+                      onChange={(e) => setShuIncludeWarungInJUA(e.target.checked)}
+                      className="mt-1 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-slate-900 dark:text-white block">
+                        Unit Warung (Toko Koperasi)
+                      </span>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        Perputaran belanja kasbon dan transaksi penjualan toko/warung anggota.
+                      </p>
+                      <span className={`inline-block mt-2 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        shuIncludeWarungInJUA
+                          ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-300'
+                          : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                      }`}>
+                        {shuIncludeWarungInJUA ? '✓ Dihitung ke JUA' : '• Dikecualikan (Hanya SP)'}
+                      </span>
+                    </div>
+                  </label>
+                </div>
+
+                {/* 3. Simpanan Sukarela */}
+                <div className={`p-3.5 rounded-xl border transition-all ${
+                  shuIncludeSukarelaInJUA
+                    ? 'bg-indigo-50/70 dark:bg-indigo-950/30 border-indigo-300 dark:border-indigo-800 shadow-2xs'
+                    : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                }`}>
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shuIncludeSukarelaInJUA}
+                      onChange={(e) => setShuIncludeSukarelaInJUA(e.target.checked)}
+                      className="mt-1 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-slate-900 dark:text-white block">
+                        Simpanan Sukarela (Tabungan Manasuka)
+                      </span>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        Setoran saldo tabungan sukarela/manasuka sebagai partisipasi usaha anggota.
+                      </p>
+                      <span className={`inline-block mt-2 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        shuIncludeSukarelaInJUA
+                          ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-300'
+                          : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                      }`}>
+                        {shuIncludeSukarelaInJUA ? '✓ Dihitung ke JUA' : '• Dikecualikan'}
+                      </span>
+                    </div>
+                  </label>
+                </div>
+
+                {/* 4. Unit Provisi & Administrasi */}
+                <div className={`p-3.5 rounded-xl border transition-all ${
+                  shuIncludeProvisiInJUA
+                    ? 'bg-indigo-50/70 dark:bg-indigo-950/30 border-indigo-300 dark:border-indigo-800 shadow-2xs'
+                    : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                }`}>
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shuIncludeProvisiInJUA}
+                      onChange={(e) => setShuIncludeProvisiInJUA(e.target.checked)}
+                      className="mt-1 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-slate-900 dark:text-white block">
+                        Unit Provisi (Administrasi Akad)
+                      </span>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        Biaya administrasi provisi saat pencairan akad pinjaman anggota.
+                      </p>
+                      <span className={`inline-block mt-2 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        shuIncludeProvisiInJUA
+                          ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-300'
+                          : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                      }`}>
+                        {shuIncludeProvisiInJUA ? '✓ Dihitung ke JUA' : '• Dikecualikan'}
+                      </span>
+                    </div>
+                  </label>
+                </div>
               </div>
             </div>
 
